@@ -89,3 +89,7 @@ This is a heuristic, not proof of identity. Two different alumni can share a nam
 When **Compare using the most complete submission per person, per file** is enabled, the app now uses the per-file representative dataset throughout the workspace: All Records, Missing Information, Unmatched, matching candidates, filtered Excel/CSV exports, unmatched exports, and Union Master. Likely repeated submissions are represented by the row with the most populated fields, with blank fields filled from other rows in that same group. Filtered exports include the representative row plus submission count and source-row provenance. Union Master chooses the most complete row as the primary version and preserves conflicting non-empty values in conflict columns.
 
 Turn the toggle off to inspect and export original rows individually. Grouping is heuristic and depends on name, graduation year, and department; review likely duplicates and conflicts before relying on a consolidated export.
+
+## Selectable comparison fields
+
+On the Match Review tab, use **Choose fields to compare** to select which imported columns participate in candidate generation and match scoring. Unchecked fields remain visible and are still included in exports, but they do not influence matching. **Select all / Auto** returns to comparing all available columns; **Clear all** pauses matching until at least one field is selected. The selected fields apply to both within-file duplicate detection and cross-file matching.

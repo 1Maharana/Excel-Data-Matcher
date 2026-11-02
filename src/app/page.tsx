@@ -33,6 +33,9 @@ export default function Home() {
   const [mapping, setMapping] = useState<Record<string, string>>({});
   const [showMapping, setShowMapping] = useState(false);
   const [collapseRepeatedSubmissions, setCollapseRepeatedSubmissions] = useState(false);
+  // null means automatically compare every imported/mapped column. An explicit array
+  // means the user has chosen exactly which fields participate in matching.
+  const [selectedMatchFields, setSelectedMatchFields] = useState<string[] | null>(null);
 
   const sourceColumns = useMemo(() => Array.from(new Set(records.flatMap((r) => Object.keys(r.data)))), [records]);
   const sources = useMemo(() => Array.from(new Set(records.map((r) => r.source))), [records]);
@@ -46,6 +49,7 @@ export default function Home() {
   }), [records, mapping]);
   // Display columns must come from normalized data keys, not original source headers.
   const columns = useMemo(() => Array.from(new Set(mappedRecords.flatMap((r) => Object.keys(r.data)))), [mappedRecords]);
+  const activeMatchFields = useMemo(() => selectedMatchFields === null ? columns : selectedMatchFields, [selectedMatchFields, columns]);
 
   // Optional per-file deduplication: repeated submissions with the same normalized
   // name + graduation year + department are represented by the most complete row
@@ -115,9 +119,9 @@ export default function Home() {
       setMatching(false);
       worker.terminate();
     };
-    worker.postMessage({ records: comparisonGroups.records, threshold });
+    worker.postMessage({ records: comparisonGroups.records, threshold, selectedFields: activeMatchFields });
     return () => worker.terminate();
-  }, [comparisonGroups, threshold, sources.length]);
+  }, [comparisonGroups, threshold, sources.length, activeMatchFields]);
   // When consolidation is enabled, every record-facing section uses the same per-file
   // representative dataset as matching. This keeps All Records, Missing, Unmatched,
   // filtered exports, and Union Master consistent instead of showing duplicate source rows.
@@ -310,7 +314,7 @@ export default function Home() {
 
   function resetWorkspace() {
     setRecords([]); setQuery(""); setSourceFilter("All files"); setMissingOnly(false);
-    setDecisions({}); setSelectedMatch(null); setMapping({}); setError(""); setTab("records"); setCollapseRepeatedSubmissions(false);
+    setDecisions({}); setSelectedMatch(null); setMapping({}); setError(""); setTab("records"); setCollapseRepeatedSubmissions(false); setSelectedMatchFields(null);
   }
 
   const tabItems: { id: Tab; label: string; count: number }[] = [
@@ -430,6 +434,38 @@ export default function Home() {
 
         {tab === "matches" && (
           <section className="mb-4 rounded-2xl border bg-white p-5">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h2 className="font-bold">Choose fields to compare</h2>
+                <p className="mt-1 max-w-3xl text-sm text-slate-500">Select the columns that should contribute to candidate generation and match scoring. Unchecked fields are ignored for matching, but remain in the records and exports.</p>
+                <p className="mt-1 text-xs text-indigo-700">{activeMatchFields.length} of {columns.length} fields selected</p>
+              </div>
+              <div className="flex gap-2">
+                <button className={buttonSecondary} onClick={() => setSelectedMatchFields(null)}>Select all / Auto</button>
+                <button className={buttonSecondary} onClick={() => setSelectedMatchFields([])}>Clear all</button>
+              </div>
+            </div>
+            {columns.length === 0 ? <p className="mt-3 text-sm text-slate-500">Import a spreadsheet to choose comparison fields.</p> : (
+              <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                {columns.map((field) => {
+                  const checked = selectedMatchFields === null || selectedMatchFields.includes(field);
+                  return <label key={field} className="flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm hover:bg-slate-50">
+                    <input type="checkbox" checked={checked} onChange={(e) => setSelectedMatchFields((current) => {
+                      const next = new Set(current === null ? columns : current);
+                      if (e.target.checked) next.add(field); else next.delete(field);
+                      return columns.every((column) => next.has(column)) ? null : Array.from(next);
+                    })} className="accent-indigo-600" />
+                    <span>{field}</span>
+                  </label>;
+                })}
+              </div>
+            )}
+            <p className="mt-3 text-xs leading-5 text-slate-400">Tip: start with Full Name/Name and Roll Number, then add Graduation Year, Department, Degree, or other reliable fields. Fields with many repeated values (such as Gender) are usually better as supporting evidence than as the only selected field.</p>
+          </section>
+        )}
+
+        {tab === "matches" && (
+          <section className="mb-4 rounded-2xl border bg-white p-5">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div><h2 className="font-bold">Match sensitivity</h2><p className="mt-1 text-sm text-slate-500">Raise the threshold to show stronger candidates only.</p></div>
               <span className="rounded-lg bg-indigo-50 px-3 py-1.5 text-sm font-bold text-indigo-700">{threshold}%</span>
@@ -443,7 +479,8 @@ export default function Home() {
         {tab === "records" && <RecordTable records={filteredRecords} columns={columns} pageSize={100} />}
         {tab === "matches" && (
           <section className="space-y-3">
-            {matching && <div className="rounded-xl border border-indigo-100 bg-indigo-50 p-4 text-sm text-indigo-800">Checking {comparisonGroups.records.length.toLocaleString()} comparison records for within-file duplicates and cross-file matches in the background. You can keep using the interface; results appear when the pass completes.</div>}
+            {activeMatchFields.length === 0 && <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">Select at least one field above to run matching.</div>}
+            {matching && <div className="rounded-xl border border-indigo-100 bg-indigo-50 p-4 text-sm text-indigo-800">Checking {comparisonGroups.records.length.toLocaleString()} comparison records using {activeMatchFields.length} selected fields for within-file duplicates and cross-file matches in the background. You can keep using the interface; results appear when the pass completes.</div>}
             {!matching && pendingMatches.length > 200 && <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">Showing the first 200 of {pendingMatches.length.toLocaleString()} pending candidates to keep the page responsive. Export matches to review the full candidate report, or narrow the list with search and filters.</div>}
             {pendingMatches.length === 0 ? <Empty title="No pending candidates" detail={sources.length < 1 ? "Import an Excel or CSV file to find possible duplicates." : "No candidates found. Check the column mapping or lower the threshold. Matching checks both duplicates within a file and common records across files."} /> :
               pendingMatches.map((m) => <article key={m.id} className="rounded-2xl border bg-white p-5 shadow-sm">

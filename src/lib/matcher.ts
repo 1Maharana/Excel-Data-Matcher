@@ -243,31 +243,52 @@ function addToIndex(index: Map<string, number[]>, key: string, recordIndex: numb
   else index.set(key, [recordIndex]);
 }
 
-export function compareRecords(records: StudentRecord[], threshold = 60): MatchCandidate[] {
+export function compareRecords(
+  records: StudentRecord[],
+  threshold = 60,
+  selectedFields?: string[]
+): MatchCandidate[] {
   if (records.length < 2) return [];
 
-  // Cache normalized comparison values once; the source data itself is never changed.
+  // If fields are supplied, ONLY those fields participate in candidate generation
+  // and scoring. Otherwise preserve the default known-field behavior for callers
+  // that have not yet added the field selector.
+  const fieldNames = Array.from(new Set(
+    (selectedFields?.length ? selectedFields : selectedFields ? [] : MATCH_FIELDS.map((f) => f.name))
+      .map((field) => field.trim()).filter(Boolean)
+  ));
+  if (!fieldNames.length) return [];
+
+  const knownField = new Map<string, { weight: number; identifier: boolean }>();
+  MATCH_FIELDS.forEach((field) => knownField.set(field.name, { weight: field.weight, identifier: field.identifier }));
+  const identifierNames = new Set(["Roll No", "Mobile", "Email", "USN", "Student ID", "Registration Number"]);
+  const fieldConfig = fieldNames.map((name) => ({
+    name,
+    weight: knownField.get(name)?.weight ?? (identifierNames.has(name) ? 35 : 10),
+    identifier: knownField.get(name)?.identifier ?? identifierNames.has(name)
+  }));
+
   const normalized = records.map((record) => {
     const values: Record<string, string> = {};
-    for (const field of MATCH_FIELDS) {
-      values[field.name] = comparisonValue(field.name, valueFor(record, field.name));
+    for (const field of fieldConfig) {
+      const raw = valueFor(record, field.name);
+      values[field.name] = comparisonValue(field.name, raw) || compact(raw);
     }
     return values;
   });
 
   const index = new Map<string, number[]>();
   records.forEach((_record, i) => {
-    const values = normalized[i];
-    for (const field of MATCH_FIELDS) {
-      const token = values[field.name];
+    for (const field of fieldConfig) {
+      const token = normalized[i][field.name];
       if (!token) continue;
-      if (field.identifier) addToIndex(index, `${field.name}:${token}`, i);
+      addToIndex(index, `field:${field.name}:${token}`, i);
 
-      if (field.name === "Name") {
-        addToIndex(index, `name-exact:${token}`, i);
-        // Prefix + word indexes catch common spelling/formatting variations.
+      // Fuzzy name candidates: prefix and shared-token indexes find likely
+      // spelling variants without requiring every record to compare to every other.
+      if (field.name === "Name" || field.name === "Full Name") {
         if (token.length >= 4) addToIndex(index, `name-prefix:${token.slice(0, 4)}`, i);
-        const originalName = valueFor(records[i], "Name").toLowerCase();
+        const originalName = valueFor(records[i], field.name).toLowerCase();
         for (const word of originalName.split(/\s+/)) {
           const wordToken = compact(word);
           if (wordToken.length >= 3) addToIndex(index, `name-word:${wordToken}`, i);
@@ -276,18 +297,15 @@ export function compareRecords(records: StudentRecord[], threshold = 60): MatchC
     }
   });
 
-  // Generate both cross-file matches and within-file duplicate candidates.
-  // Buckets with too many records are skipped to avoid quadratic explosions.
-  // Identifier buckets are inserted first, so the strongest evidence is prioritized.
   const pairs = new Set<string>();
   const MAX_PAIRS_PER_BUCKET = 20_000;
   const MAX_TOTAL_CANDIDATE_PAIRS = 250_000;
-
   for (const bucket of index.values()) {
     if (bucket.length < 2) continue;
     const estimatedPairs = (bucket.length * (bucket.length - 1)) / 2;
+    // Common fields (e.g. gender or department) are useful for scoring but not
+    // sufficient to generate an enormous quadratic bucket by themselves.
     if (estimatedPairs > MAX_PAIRS_PER_BUCKET) continue;
-
     for (let a = 0; a < bucket.length; a++) {
       for (let b = a + 1; b < bucket.length; b++) {
         if (pairs.size >= MAX_TOTAL_CANDIDATE_PAIRS) break;
@@ -313,7 +331,7 @@ export function compareRecords(records: StudentRecord[], threshold = 60): MatchC
     let exactStrongId = false;
     const reasons: string[] = [];
 
-    for (const field of MATCH_FIELDS) {
+    for (const field of fieldConfig) {
       const a = normalized[i][field.name];
       const b = normalized[j][field.name];
       if (!a || !b) continue;
@@ -322,12 +340,12 @@ export function compareRecords(records: StudentRecord[], threshold = 60): MatchC
       if (field.identifier && sim === 1) exactStrongId = true;
       if (field.identifier && sim < 0.85) conflictingStrongIds++;
 
-      const accepted = sim === 1 || (field.name === "Name" && sim >= 0.7) || (!field.identifier && sim >= 0.8);
+      const isName = field.name === "Name" || field.name === "Full Name";
+      const accepted = sim === 1 || (isName && sim >= 0.7) || (!field.identifier && sim >= 0.8);
       if (accepted) {
         points += field.weight * (field.identifier ? 1 : sim);
         reasons.push(sim === 1 ? `Same ${field.name}` : `Similar ${field.name}`);
-      } else if (!field.identifier && field.name !== "Gender" && sim < 0.5) {
-        // Keep major conflicts visible in the candidate review details.
+      } else if (!field.identifier && sim < 0.5) {
         reasons.push(`Different ${field.name}`);
       }
     }
@@ -338,6 +356,8 @@ export function compareRecords(records: StudentRecord[], threshold = 60): MatchC
     if (score < threshold) continue;
 
     const sameSource = left.source === right.source;
+    const nameValue = normalized[i].Name ?? normalized[i]["Full Name"];
+    const otherNameValue = normalized[j].Name ?? normalized[j]["Full Name"];
     results.push({
       id: [left.id, right.id].sort().join("::"),
       left,
@@ -348,7 +368,7 @@ export function compareRecords(records: StudentRecord[], threshold = 60): MatchC
         ...reasons,
         ...(conflictingStrongIds > 0 ? ["Conflicting identifier(s)—review carefully"] : [])
       ],
-      status: score >= 80 && (exactStrongId || normalized[i].Name === normalized[j].Name)
+      status: score >= 80 && (exactStrongId || (!!nameValue && nameValue === otherNameValue))
         ? "Likely match"
         : "Review"
     });
