@@ -45,7 +45,11 @@ const aliases: Record<string, string[]> = {
     "usn",
     "student id",
     "registration number",
-    "register number"
+    "register number",
+    "sr no",
+    "sr number",
+    "serial no",
+    "serial number"
   ],
   Department: [
     "department",
@@ -193,8 +197,25 @@ const MATCH_FIELDS = [
   { name: "Gender", weight: 5, identifier: false }
 ] as const;
 
+/**
+ * Canonical department aliases approved for this institution.
+ * Keep the source text untouched; this value is used only for comparison/grouping.
+ */
+const departmentAliases: Record<string, string> = {
+  // Materials Engineering is the current preferred label; Metallurgy is a legacy alias.
+  materialsengineering: "materialsengineering",
+  metallurgy: "materialsengineering",
+
+  // CSA is the preferred umbrella label. CSE is treated as part of CSA per the
+  // institution's rule supplied for this reconciliation exercise.
+  csa: "csa",
+  computerscienceandautomation: "csa",
+  cse: "csa",
+  computerscienceengineering: "csa"
+};
+
 /** Normalize common value variants for comparison only; exports retain original values. */
-function comparisonValue(field: string, value: string): string {
+export function comparisonValue(field: string, value: string): string {
   const trimmed = normalizeValue(value).toLowerCase();
   if (!trimmed) return "";
 
@@ -217,11 +238,12 @@ function comparisonValue(field: string, value: string): string {
   }
 
   if (field === "Department") {
-    return compact(trimmed
+    const token = compact(trimmed
       .replace(/&/g, " and ")
       .replace(/\bdept\.?\b/g, "department")
       .replace(/\bengg\.?\b/g, "engineering")
       .replace(/\beng\.?\b/g, "engineering"));
+    return departmentAliases[token] ?? token;
   }
 
   if (field === "Graduation Year") {
@@ -243,52 +265,31 @@ function addToIndex(index: Map<string, number[]>, key: string, recordIndex: numb
   else index.set(key, [recordIndex]);
 }
 
-export function compareRecords(
-  records: StudentRecord[],
-  threshold = 60,
-  selectedFields?: string[]
-): MatchCandidate[] {
+export function compareRecords(records: StudentRecord[], threshold = 60): MatchCandidate[] {
   if (records.length < 2) return [];
 
-  // If fields are supplied, ONLY those fields participate in candidate generation
-  // and scoring. Otherwise preserve the default known-field behavior for callers
-  // that have not yet added the field selector.
-  const fieldNames = Array.from(new Set(
-    (selectedFields?.length ? selectedFields : selectedFields ? [] : MATCH_FIELDS.map((f) => f.name))
-      .map((field) => field.trim()).filter(Boolean)
-  ));
-  if (!fieldNames.length) return [];
-
-  const knownField = new Map<string, { weight: number; identifier: boolean }>();
-  MATCH_FIELDS.forEach((field) => knownField.set(field.name, { weight: field.weight, identifier: field.identifier }));
-  const identifierNames = new Set(["Roll No", "Mobile", "Email", "USN", "Student ID", "Registration Number"]);
-  const fieldConfig = fieldNames.map((name) => ({
-    name,
-    weight: knownField.get(name)?.weight ?? (identifierNames.has(name) ? 35 : 10),
-    identifier: knownField.get(name)?.identifier ?? identifierNames.has(name)
-  }));
-
+  // Cache normalized comparison values once; the source data itself is never changed.
   const normalized = records.map((record) => {
     const values: Record<string, string> = {};
-    for (const field of fieldConfig) {
-      const raw = valueFor(record, field.name);
-      values[field.name] = comparisonValue(field.name, raw) || compact(raw);
+    for (const field of MATCH_FIELDS) {
+      values[field.name] = comparisonValue(field.name, valueFor(record, field.name));
     }
     return values;
   });
 
   const index = new Map<string, number[]>();
   records.forEach((_record, i) => {
-    for (const field of fieldConfig) {
-      const token = normalized[i][field.name];
+    const values = normalized[i];
+    for (const field of MATCH_FIELDS) {
+      const token = values[field.name];
       if (!token) continue;
-      addToIndex(index, `field:${field.name}:${token}`, i);
+      if (field.identifier) addToIndex(index, `${field.name}:${token}`, i);
 
-      // Fuzzy name candidates: prefix and shared-token indexes find likely
-      // spelling variants without requiring every record to compare to every other.
-      if (field.name === "Name" || field.name === "Full Name") {
+      if (field.name === "Name") {
+        addToIndex(index, `name-exact:${token}`, i);
+        // Prefix + word indexes catch common spelling/formatting variations.
         if (token.length >= 4) addToIndex(index, `name-prefix:${token.slice(0, 4)}`, i);
-        const originalName = valueFor(records[i], field.name).toLowerCase();
+        const originalName = valueFor(records[i], "Name").toLowerCase();
         for (const word of originalName.split(/\s+/)) {
           const wordToken = compact(word);
           if (wordToken.length >= 3) addToIndex(index, `name-word:${wordToken}`, i);
@@ -297,15 +298,18 @@ export function compareRecords(
     }
   });
 
+  // Generate both cross-file matches and within-file duplicate candidates.
+  // Buckets with too many records are skipped to avoid quadratic explosions.
+  // Identifier buckets are inserted first, so the strongest evidence is prioritized.
   const pairs = new Set<string>();
   const MAX_PAIRS_PER_BUCKET = 20_000;
   const MAX_TOTAL_CANDIDATE_PAIRS = 250_000;
+
   for (const bucket of index.values()) {
     if (bucket.length < 2) continue;
     const estimatedPairs = (bucket.length * (bucket.length - 1)) / 2;
-    // Common fields (e.g. gender or department) are useful for scoring but not
-    // sufficient to generate an enormous quadratic bucket by themselves.
     if (estimatedPairs > MAX_PAIRS_PER_BUCKET) continue;
+
     for (let a = 0; a < bucket.length; a++) {
       for (let b = a + 1; b < bucket.length; b++) {
         if (pairs.size >= MAX_TOTAL_CANDIDATE_PAIRS) break;
@@ -331,7 +335,7 @@ export function compareRecords(
     let exactStrongId = false;
     const reasons: string[] = [];
 
-    for (const field of fieldConfig) {
+    for (const field of MATCH_FIELDS) {
       const a = normalized[i][field.name];
       const b = normalized[j][field.name];
       if (!a || !b) continue;
@@ -340,12 +344,12 @@ export function compareRecords(
       if (field.identifier && sim === 1) exactStrongId = true;
       if (field.identifier && sim < 0.85) conflictingStrongIds++;
 
-      const isName = field.name === "Name" || field.name === "Full Name";
-      const accepted = sim === 1 || (isName && sim >= 0.7) || (!field.identifier && sim >= 0.8);
+      const accepted = sim === 1 || (field.name === "Name" && sim >= 0.7) || (!field.identifier && sim >= 0.8);
       if (accepted) {
         points += field.weight * (field.identifier ? 1 : sim);
         reasons.push(sim === 1 ? `Same ${field.name}` : `Similar ${field.name}`);
-      } else if (!field.identifier && sim < 0.5) {
+      } else if (!field.identifier && field.name !== "Gender" && sim < 0.5) {
+        // Keep major conflicts visible in the candidate review details.
         reasons.push(`Different ${field.name}`);
       }
     }
@@ -356,8 +360,6 @@ export function compareRecords(
     if (score < threshold) continue;
 
     const sameSource = left.source === right.source;
-    const nameValue = normalized[i].Name ?? normalized[i]["Full Name"];
-    const otherNameValue = normalized[j].Name ?? normalized[j]["Full Name"];
     results.push({
       id: [left.id, right.id].sort().join("::"),
       left,
@@ -368,7 +370,7 @@ export function compareRecords(
         ...reasons,
         ...(conflictingStrongIds > 0 ? ["Conflicting identifier(s)—review carefully"] : [])
       ],
-      status: score >= 80 && (exactStrongId || (!!nameValue && nameValue === otherNameValue))
+      status: score >= 80 && (exactStrongId || normalized[i].Name === normalized[j].Name)
         ? "Likely match"
         : "Review"
     });
