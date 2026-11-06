@@ -36,9 +36,21 @@ export default function Home() {
   const [showMapping, setShowMapping] = useState(false);
   const [collapseRepeatedSubmissions, setCollapseRepeatedSubmissions] = useState(false);
   const [autoConfirmEnabled, setAutoConfirmEnabled] = useState(false);
+  const [masterSource, setMasterSource] = useState("");
+  const [exportComposition, setExportComposition] = useState<"union" | "enriched" | "original">("enriched");
+  const [selectedExportFields, setSelectedExportFields] = useState<string[]>([]);
+  const [exportFieldsInitialized, setExportFieldsInitialized] = useState(false);
+  const [includeOriginalValues, setIncludeOriginalValues] = useState(false);
+  const [includeEnrichmentStatus, setIncludeEnrichmentStatus] = useState(true);
+  const [includeReviewSheets, setIncludeReviewSheets] = useState(true);
+  const [includeRejectedSheet, setIncludeRejectedSheet] = useState(true);
+  const [includeMatchedSheet, setIncludeMatchedSheet] = useState(true);
 
   const sourceColumns = useMemo(() => Array.from(new Set(records.flatMap((r) => Object.keys(r.data)))), [records]);
   const sources = useMemo(() => Array.from(new Set(records.map((r) => r.source))), [records]);
+  useEffect(() => {
+    if (sources.length && (!masterSource || !sources.includes(masterSource))) setMasterSource(sources[0]);
+  }, [sources, masterSource]);
   const mappedRecords = useMemo(() => records.map((r) => {
     const data: Record<string, string> = {};
     for (const [key, value] of Object.entries(r.data)) {
@@ -49,6 +61,12 @@ export default function Home() {
   }), [records, mapping]);
   // Display columns must come from normalized data keys, not original source headers.
   const columns = useMemo(() => Array.from(new Set(mappedRecords.flatMap((r) => Object.keys(r.data)))), [mappedRecords]);
+  useEffect(() => {
+    if (columns.length && !exportFieldsInitialized) {
+      setSelectedExportFields(columns);
+      setExportFieldsInitialized(true);
+    }
+  }, [columns, exportFieldsInitialized]);
 
   // Optional per-file deduplication: repeated submissions with the same normalized
   // name + graduation year + department are represented by the most complete row
@@ -323,9 +341,108 @@ export default function Home() {
     exportRows(rows, "union-master.xlsx");
   }
 
+  function exportConfiguredMaster() {
+    if (!masterSource) { setError("Choose the master source file first."); return; }
+    const incomingSources = sources.filter((source) => source !== masterSource);
+    const masterRecords = mappedRecords.filter((record) => record.source === masterSource);
+    if (!masterRecords.length) { setError("No records were found in the selected master source."); return; }
+    if (!selectedExportFields.length) { setError("Select at least one field to export."); return; }
+
+    const confirmed = matches.filter((match) => {
+      const decision = effectiveDecision(match);
+      return decision === "Confirmed same person" || decision === "Auto-confirmed same person";
+    });
+    const pending = matches.filter((match) => !decisions[match.id] && !(autoConfirmEnabled && match.autoConfirmEligible));
+    const rejected = matches.filter((match) => decisions[match.id] === "Not a match");
+
+    // Map confirmed cross-file matches from each master record to its incoming record(s).
+    const enrichments = new Map<string, StudentRecord[]>();
+    for (const match of confirmed) {
+      const masterSide = match.left.source === masterSource ? match.left : match.right.source === masterSource ? match.right : null;
+      const incomingSide = match.left.source === masterSource ? match.right : match.right.source === masterSource ? match.left : null;
+      if (!masterSide || !incomingSide || !incomingSources.includes(incomingSide.source)) continue;
+      const list = enrichments.get(masterSide.id) ?? [];
+      list.push(incomingSide);
+      enrichments.set(masterSide.id, list);
+    }
+
+    const selectedFields = selectedExportFields;
+    const masterRows = masterRecords.map((master) => {
+      const donors = enrichments.get(master.id) ?? [];
+      const output: Record<string, unknown> = {
+        "Master Source File": master.source,
+        "Master Source Row": master.rowNumber
+      };
+      for (const field of selectedFields) {
+        const original = normalizeValue(master.data[field] ?? "");
+        const donorValues = donors.map((donor) => normalizeValue(donor.data[field] ?? "")).filter(Boolean);
+        const enrichedValue = original || donorValues[0] || "";
+        output[field] = enrichedValue;
+        if (includeOriginalValues) output[`${field} (Original D1)`] = original;
+      }
+      if (includeEnrichmentStatus) {
+        const enrichedFields = selectedFields.filter((field) => !normalizeValue(master.data[field] ?? "") && donors.some((donor) => normalizeValue(donor.data[field] ?? "")));
+        output["Enrichment Status"] = enrichedFields.length ? "Enriched from approved match" : donors.length ? "Matched; no fields enriched" : "No approved D2 match";
+        output["Enriched Fields"] = enrichedFields.join("; ");
+        output["Approved D2 Sources"] = Array.from(new Set(donors.map((donor) => donor.source))).join("; ");
+      }
+      return output;
+    });
+
+    let finalRows = masterRows;
+    if (exportComposition === "union") {
+      const candidateIncomingIds = new Set<string>();
+      for (const match of matches) {
+        const incomingSide = match.left.source === masterSource ? match.right : match.right.source === masterSource ? match.left : null;
+        if (incomingSide && incomingSources.includes(incomingSide.source)) candidateIncomingIds.add(incomingSide.id);
+      }
+      const confirmedIncomingIds = new Set<string>();
+      for (const match of confirmed) {
+        const incomingSide = match.left.source === masterSource ? match.right : match.right.source === masterSource ? match.left : null;
+        if (incomingSide && incomingSources.includes(incomingSide.source)) confirmedIncomingIds.add(incomingSide.id);
+      }
+      const incomingOnly = mappedRecords.filter((record) => incomingSources.includes(record.source) && !confirmedIncomingIds.has(record.id) && !pending.some((match) => match.left.id === record.id || match.right.id === record.id));
+      const unmatchedIncoming = incomingOnly.filter((record) => !candidateIncomingIds.has(record.id) || rejected.some((match) => match.left.id === record.id || match.right.id === record.id));
+      const appended = unmatchedIncoming.map((record) => {
+        const row: Record<string, unknown> = { "Record Origin": "Unmatched D2", "Source File": record.source, "Source Row": record.rowNumber };
+        for (const field of selectedFields) row[field] = normalizeValue(record.data[field] ?? "");
+        if (includeEnrichmentStatus) { row["Enrichment Status"] = "New D2-only record"; row["Enriched Fields"] = ""; }
+        return row;
+      });
+      finalRows = [...masterRows, ...appended];
+    }
+    if (exportComposition === "original") {
+      finalRows = masterRecords.map((record) => {
+        const row: Record<string, unknown> = { "Master Source File": record.source, "Master Source Row": record.rowNumber };
+        for (const field of selectedFields) row[field] = normalizeValue(record.data[field] ?? "");
+        if (includeEnrichmentStatus) { row["Enrichment Status"] = "Original D1"; row["Enriched Fields"] = ""; }
+        return row;
+      });
+    }
+
+    const workbook = XLSX.utils.book_new();
+    const appendSheet = (rows: Record<string, unknown>[], name: string) => {
+      const safeRows = rows.length ? rows : [{ Note: "No records in this category." }];
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(safeRows), name.slice(0, 31));
+    };
+    appendSheet(finalRows, "Final_Master");
+    if (includeMatchedSheet) {
+      appendSheet(confirmed.map((match) => ({ "Review Decision": effectiveDecision(match), "Similarity Score": match.score, Reasons: match.reasons.join("; "), "Master File": masterSource, "Master Row": match.left.source === masterSource ? match.left.rowNumber : match.right.rowNumber, "Incoming File": match.left.source === masterSource ? match.right.source : match.left.source, "Incoming Row": match.left.source === masterSource ? match.right.rowNumber : match.left.rowNumber })), "Matched_Records");
+    }
+    if (includeReviewSheets) {
+      appendSheet(pending.map((match) => ({ Status: "Pending review", "Similarity Score": match.score, Reasons: match.reasons.join("; "), "File A": match.left.source, "Row A": match.left.rowNumber, "Name A": match.left.data.Name ?? match.left.data["Full Name"] ?? "", "File B": match.right.source, "Row B": match.right.rowNumber, "Name B": match.right.data.Name ?? match.right.data["Full Name"] ?? "" })), "Pending_Review");
+    }
+    if (includeRejectedSheet) {
+      appendSheet(rejected.map((match) => ({ Status: "Rejected match", "Similarity Score": match.score, Reasons: match.reasons.join("; "), "File A": match.left.source, "Row A": match.left.rowNumber, "Name A": match.left.data.Name ?? match.left.data["Full Name"] ?? "", "File B": match.right.source, "Row B": match.right.rowNumber, "Name B": match.right.data.Name ?? match.right.data["Full Name"] ?? "" })), "Rejected_Matches");
+    }
+    XLSX.writeFile(workbook, "configured-master-export.xlsx");
+    setError("");
+  }
+
   function resetWorkspace() {
     setRecords([]); setQuery(""); setSourceFilter("All files"); setMissingOnly(false);
     setDecisions({}); setSelectedMatch(null); setMapping({}); setError(""); setTab("records"); setCollapseRepeatedSubmissions(false); setAutoConfirmEnabled(false);
+    setMasterSource(""); setExportComposition("enriched"); setSelectedExportFields([]); setExportFieldsInitialized(false);
   }
 
   const tabItems: { id: Tab; label: string; count: number }[] = [
@@ -403,8 +520,53 @@ export default function Home() {
           <button className={buttonSecondary} onClick={() => exportRows(filteredRecords.map((r) => { const members = comparisonGroups.membersByRepresentative.get(r.id) ?? [r]; return { "Source File": r.source, "Representative Source Row": r.rowNumber, "Repeated Submissions Grouped": members.length > 1 ? "Yes" : "No", "Submission Count": members.length, "Source Rows In Group": members.map((member) => `${member.source}: ${member.rowNumber}`).join("; "), ...r.data }; }), "filtered-records.csv")}>Export CSV</button>
           <button className={buttonSecondary} onClick={exportMatches}>Export matches</button>
           <button className={buttonSecondary} onClick={() => exportRecords(unmatchedRecords, "unmatched-records.xlsx")}>Export unmatched</button>
-          <button className={buttonPrimary} onClick={exportUnion}>Export Union Master</button>
         </section>
+
+        {records.length > 0 && sources.length > 1 && (
+          <section className="mb-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div><h2 className="text-lg font-bold">Export Master Configuration</h2><p className="mt-1 text-sm text-slate-500">Choose which datasets, fields and review worksheets to include in your export.</p></div>
+              <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">Master-based</span>
+            </div>
+            <div className="mt-4 grid gap-4 md:grid-cols-2">
+              <label className="text-sm font-medium">Master dataset (D1)
+                <select value={masterSource} onChange={(e) => setMasterSource(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2">
+                  {sources.map((source) => <option key={source} value={source}>{source}</option>)}
+                </select>
+              </label>
+              <div className="text-sm"><span className="font-medium">Incoming dataset(s) (D2)</span><p className="mt-1 rounded-lg bg-slate-50 px-3 py-2 text-slate-600">{sources.filter((source) => source !== masterSource).join(", ") || "No incoming files selected"}</p></div>
+            </div>
+            <div className="mt-5">
+              <h3 className="font-semibold">Choose dataset composition</h3>
+              <div className="mt-2 grid gap-2 lg:grid-cols-3">
+                <label className={`cursor-pointer rounded-xl border p-3 ${exportComposition === "union" ? "border-indigo-400 bg-indigo-50" : "border-slate-200"}`}><input type="radio" name="exportComposition" checked={exportComposition === "union"} onChange={() => setExportComposition("union")} className="mr-2 accent-indigo-600"/><span className="font-semibold">D1 + Unmatched D2 + Approved Enrichment</span><span className="mt-1 block text-xs text-slate-500">Adds D2-only individuals that are not pending a possible match.</span></label>
+                <label className={`cursor-pointer rounded-xl border p-3 ${exportComposition === "enriched" ? "border-indigo-400 bg-indigo-50" : "border-slate-200"}`}><input type="radio" name="exportComposition" checked={exportComposition === "enriched"} onChange={() => setExportComposition("enriched")} className="mr-2 accent-indigo-600"/><span className="font-semibold">D1 + Approved Enrichment</span><span className="mt-1 block text-xs text-slate-500">Keeps D1's record count; excludes all unmatched D2 individuals.</span></label>
+                <label className={`cursor-pointer rounded-xl border p-3 ${exportComposition === "original" ? "border-indigo-400 bg-indigo-50" : "border-slate-200"}`}><input type="radio" name="exportComposition" checked={exportComposition === "original"} onChange={() => setExportComposition("original")} className="mr-2 accent-indigo-600"/><span className="font-semibold">D1 Only</span><span className="mt-1 block text-xs text-slate-500">Exports original master values without D2 enrichment.</span></label>
+              </div>
+            </div>
+            <div className="mt-5 border-t border-slate-100 pt-4">
+              <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-semibold">Select fields</h3><div className="flex gap-3 text-xs"><button onClick={() => setSelectedExportFields(columns)} className="font-semibold text-indigo-700">Select all</button><button onClick={() => setSelectedExportFields([])} className="font-semibold text-slate-500">Clear</button></div></div>
+              <p className="mt-1 text-xs text-slate-500">{selectedExportFields.length} of {columns.length} fields selected</p>
+              <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{columns.map((field) => <label key={field} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={selectedExportFields.includes(field)} onChange={(e) => setSelectedExportFields((old) => e.target.checked ? [...old, field] : old.filter((item) => item !== field))} className="accent-indigo-600"/>{field}</label>)}</div>
+            </div>
+            <div className="mt-5 border-t border-slate-100 pt-4">
+              <h3 className="font-semibold">Additional export options</h3>
+              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={includeOriginalValues} onChange={(e) => setIncludeOriginalValues(e.target.checked)} className="accent-indigo-600"/>Include original D1 values in separate columns</label>
+                <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={includeEnrichmentStatus} onChange={(e) => setIncludeEnrichmentStatus(e.target.checked)} className="accent-indigo-600"/>Include enrichment and verification status</label>
+                <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={includeMatchedSheet} onChange={(e) => setIncludeMatchedSheet(e.target.checked)} className="accent-indigo-600"/>Include confirmed matches worksheet</label>
+                <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={includeReviewSheets} onChange={(e) => setIncludeReviewSheets(e.target.checked)} className="accent-indigo-600"/>Include pending Match Review worksheet</label>
+                <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={includeRejectedSheet} onChange={(e) => setIncludeRejectedSheet(e.target.checked)} className="accent-indigo-600"/>Include rejected matches worksheet</label>
+              </div>
+            </div>
+            <div className="mt-5 rounded-xl bg-slate-50 p-4">
+              <h3 className="font-semibold">Export preview</h3>
+              <div className="mt-2 space-y-2 text-sm"><div className="flex justify-between"><span className="text-slate-500">Master records</span><strong>{mappedRecords.filter((record) => record.source === masterSource).length.toLocaleString()}</strong></div><div className="flex justify-between"><span className="text-slate-500">Approved cross-file matches</span><strong>{matches.filter((match) => (effectiveDecision(match) === "Confirmed same person" || effectiveDecision(match) === "Auto-confirmed same person") && (match.left.source === masterSource || match.right.source === masterSource)).length.toLocaleString()}</strong></div><div className="flex justify-between"><span className="text-slate-500">Pending candidates in review sheet</span><strong>{matches.filter((match) => !decisions[match.id] && !(autoConfirmEnabled && match.autoConfirmEligible)).length.toLocaleString()}</strong></div><div className="flex justify-between"><span className="text-slate-500">Unmatched D2 included in master</span><strong>{exportComposition === "union" ? "Yes" : "No"}</strong></div><div className="flex justify-between"><span className="text-slate-500">Selected fields</span><strong>{selectedExportFields.length}</strong></div></div>
+            </div>
+            <button disabled={!selectedExportFields.length || !masterSource} onClick={exportConfiguredMaster} className={`${buttonPrimary} mt-4 w-full disabled:cursor-not-allowed disabled:opacity-50`}>Export configured Excel workbook</button>
+            <p className="mt-2 text-xs text-slate-500">Pending matches are exported to a separate worksheet when selected; they never enrich Final_Master. Only confirmed or eligible auto-confirmed matches enrich D1.</p>
+          </section>
+        )}
 
         {showMapping && (
           <section className="mb-4 rounded-2xl border bg-white p-5">
