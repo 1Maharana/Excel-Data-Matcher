@@ -13,6 +13,7 @@ import {
 
 type Tab = "records" | "matches" | "missing" | "unmatched";
 type ReviewDecision = "Confirmed same person" | "Not a match";
+type EffectiveDecision = ReviewDecision | "Auto-confirmed same person";
 
 const buttonBase = "rounded-xl px-3.5 py-2 text-sm font-semibold transition";
 const buttonPrimary = `${buttonBase} bg-indigo-600 text-white hover:bg-indigo-700`;
@@ -34,6 +35,7 @@ export default function Home() {
   const [mapping, setMapping] = useState<Record<string, string>>({});
   const [showMapping, setShowMapping] = useState(false);
   const [collapseRepeatedSubmissions, setCollapseRepeatedSubmissions] = useState(false);
+  const [autoConfirmEnabled, setAutoConfirmEnabled] = useState(false);
 
   const sourceColumns = useMemo(() => Array.from(new Set(records.flatMap((r) => Object.keys(r.data)))), [records]);
   const sources = useMemo(() => Array.from(new Set(records.map((r) => r.source))), [records]);
@@ -134,11 +136,17 @@ export default function Home() {
     return true;
   }), [activeRecords, query, sourceFilter, missingOnly]);
 
-  const pendingMatches = useMemo(() => matches.filter((m) => !decisions[m.id]).filter((m) => {
+  const effectiveDecision = (match: (typeof matches)[number]): EffectiveDecision | undefined => {
+    if (decisions[match.id]) return decisions[match.id];
+    if (autoConfirmEnabled && match.autoConfirmEligible) return "Auto-confirmed same person";
+    return undefined;
+  };
+
+  const pendingMatches = useMemo(() => matches.filter((m) => !decisions[m.id] && !(autoConfirmEnabled && m.autoConfirmEligible)).filter((m) => {
     const text = [m.left.source, m.right.source, ...Object.values(m.left.data), ...Object.values(m.right.data)].join(" ").toLowerCase();
     return text.includes(query.toLowerCase()) &&
       (sourceFilter === "All files" || m.left.source === sourceFilter || m.right.source === sourceFilter);
-  }), [matches, decisions, query, sourceFilter]);
+  }), [matches, decisions, autoConfirmEnabled, query, sourceFilter]);
 
   const missingRecords = useMemo(() => filteredRecords.filter((r) =>
     Object.values(r.data).some((value) => !normalizeValue(value))
@@ -219,7 +227,8 @@ export default function Home() {
 
   function exportMatches() {
     exportRows(matches.map((m) => ({
-      "Review Decision": decisions[m.id] || "Pending review",
+      "Review Decision": effectiveDecision(m) || "Pending review",
+      "Auto-confirm eligible": m.autoConfirmEligible ? "Yes" : "No",
       Status: m.status,
       "Similarity Score": m.score,
       Reasons: m.reasons.join("; "),
@@ -263,7 +272,10 @@ export default function Home() {
         for (const member of members.slice(1)) unite(first.id, member.id);
       }
     }
-    const confirmedMatches = matches.filter((match) => decisions[match.id] === "Confirmed same person");
+    const confirmedMatches = matches.filter((match) => {
+      const decision = effectiveDecision(match);
+      return decision === "Confirmed same person" || decision === "Auto-confirmed same person";
+    });
     for (const match of confirmedMatches) {
       const leftMembers = comparisonGroups.membersByRepresentative.get(match.left.id) ?? [match.left];
       const rightMembers = comparisonGroups.membersByRepresentative.get(match.right.id) ?? [match.right];
@@ -313,7 +325,7 @@ export default function Home() {
 
   function resetWorkspace() {
     setRecords([]); setQuery(""); setSourceFilter("All files"); setMissingOnly(false);
-    setDecisions({}); setSelectedMatch(null); setMapping({}); setError(""); setTab("records"); setCollapseRepeatedSubmissions(false);
+    setDecisions({}); setSelectedMatch(null); setMapping({}); setError(""); setTab("records"); setCollapseRepeatedSubmissions(false); setAutoConfirmEnabled(false);
   }
 
   const tabItems: { id: Tab; label: string; count: number }[] = [
@@ -366,7 +378,7 @@ export default function Home() {
           <Stat label={collapseRepeatedSubmissions ? "Records after consolidation" : "Imported records"} value={collapseRepeatedSubmissions ? comparisonGroups.records.length : records.length} note={collapseRepeatedSubmissions ? `${records.length.toLocaleString()} original rows · duplicates grouped within each file` : "Original rows across all files"} />
           <Stat label="Source files" value={sources.length} note="Distinct uploaded files" />
           <Stat label="Match candidates" value={matches.length} note={matching ? "Matching in background…" : "Pairs to assess"} />
-          <Stat label="Reviewed" value={Object.keys(decisions).length} note="Decisions in this session" />
+          <Stat label="Reviewed / auto-confirmed" value={Object.keys(decisions).length + (autoConfirmEnabled ? matches.filter((m) => m.autoConfirmEligible && !decisions[m.id]).length : 0)} note="Manual decisions + eligible automatic confirmations" />
         </section>
 
         {records.length > 0 && (
@@ -440,6 +452,16 @@ export default function Home() {
             <input type="range" min={30} max={95} step={5} value={threshold} onChange={(e) => setThreshold(Number(e.target.value))}
               className="mt-4 w-full accent-indigo-600" />
             <div className="mt-1 flex justify-between text-xs text-slate-400"><span>More candidates</span><span>Stricter matches</span></div>
+            <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50/70 p-3">
+              <label className="flex cursor-pointer items-start gap-3">
+                <input type="checkbox" checked={autoConfirmEnabled} onChange={(e) => setAutoConfirmEnabled(e.target.checked)} className="mt-1 accent-emerald-600" />
+                <span>
+                  <span className="block text-sm font-semibold text-emerald-950">Automatically confirm unique high-confidence matches</span>
+                  <span className="mt-1 block text-xs leading-5 text-emerald-800">Only cross-file pairs with exact normalised Name + Roll No + Graduation Year, no conflicting email/mobile values, and a unique one-to-one candidate are eligible. All other candidates remain in Match Review. This is optional and OFF by default.</span>
+                  <span className="mt-1 block text-xs font-semibold text-emerald-900">{matches.filter((m) => m.autoConfirmEligible).length.toLocaleString()} candidates currently eligible.</span>
+                </span>
+              </label>
+            </div>
           </section>
         )}
 
@@ -454,7 +476,8 @@ export default function Home() {
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="rounded-full bg-indigo-50 px-3 py-1 text-sm font-bold text-indigo-700">{m.score}% score</span>
-                      <span className={`rounded-full px-3 py-1 text-xs font-semibold ${m.status === "Likely match" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{m.status}</span>
+                      <span className={`rounded-full px-3 py-1 text-xs font-semibold ${m.status === "High confidence" ? "bg-emerald-50 text-emerald-700" : m.status === "Likely match" ? "bg-blue-50 text-blue-700" : "bg-amber-50 text-amber-700"}`}>{m.status}</span>
+                      {autoConfirmEnabled && m.autoConfirmEligible && <span className="rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-semibold text-emerald-800">Auto-confirmed</span>}
                     </div>
                     <h3 className="mt-3 text-lg font-bold">{m.left.data.Name || "Record A"} <span className="font-normal text-slate-400">↔</span> {m.right.data.Name || "Record B"}</h3>
                     <p className="mt-1 break-words text-sm text-slate-500">{m.left.source} · row {m.left.rowNumber} <span className="mx-1">/</span> {m.right.source} · row {m.right.rowNumber}</p>
@@ -475,7 +498,7 @@ export default function Home() {
         {activeMatch && <CompareModal match={activeMatch} onClose={() => setSelectedMatch(null)} />}
         <footer className="mt-8 flex flex-col gap-1 border-t border-slate-200 pt-5 text-xs leading-5 text-slate-400 sm:flex-row sm:justify-between">
           <span>Excel Data Matcher · Standalone local-first tool</span>
-          <span>Similarity scores are heuristics, not identity verification.</span>
+          <span>Similarity scores are heuristics. Automatic confirmation is restricted to unique exact-identifier matches.</span>
         </footer>
       </div>
     </main>

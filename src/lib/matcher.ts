@@ -12,7 +12,8 @@ export type MatchCandidate = {
   right: StudentRecord;
   score: number;
   reasons: string[];
-  status: "Likely match" | "Review";
+  status: "High confidence" | "Likely match" | "Review";
+  autoConfirmEligible: boolean;
 };
 
 const aliases: Record<string, string[]> = {
@@ -211,7 +212,8 @@ const departmentAliases: Record<string, string> = {
   csa: "csa",
   computerscienceandautomation: "csa",
   cse: "csa",
-  computerscienceengineering: "csa"
+  computerscienceengineering: "csa",
+  computerscienceandengineering: "csa"
 };
 
 /** Normalize common value variants for comparison only; exports retain original values. */
@@ -360,6 +362,17 @@ export function compareRecords(records: StudentRecord[], threshold = 60): MatchC
     if (score < threshold) continue;
 
     const sameSource = left.source === right.source;
+    const exactName = Boolean(normalized[i].Name && normalized[i].Name === normalized[j].Name);
+    const exactRoll = Boolean(normalized[i]["Roll No"] && normalized[i]["Roll No"] === normalized[j]["Roll No"]);
+    const exactYear = Boolean(normalized[i]["Graduation Year"] && normalized[i]["Graduation Year"] === normalized[j]["Graduation Year"]);
+    const conflictingOptionalIdentifiers = (["Email", "Mobile"] as const).some((field) => {
+      const a = normalized[i][field];
+      const b = normalized[j][field];
+      return Boolean(a && b && a !== b);
+    });
+    const strictHighConfidence = !sameSource && exactName && exactRoll && exactYear &&
+      conflictingStrongIds === 0 && !conflictingOptionalIdentifiers;
+
     results.push({
       id: [left.id, right.id].sort().join("::"),
       left,
@@ -368,13 +381,36 @@ export function compareRecords(records: StudentRecord[], threshold = 60): MatchC
       reasons: [
         ...(sameSource ? ["Within-file duplicate candidate"] : ["Cross-file match candidate"]),
         ...reasons,
-        ...(conflictingStrongIds > 0 ? ["Conflicting identifier(s)—review carefully"] : [])
+        ...(strictHighConfidence ? ["Exact name + roll number + graduation year"] : []),
+        ...(conflictingStrongIds > 0 ? ["Conflicting identifier(s)—review carefully"] : []),
+        ...(conflictingOptionalIdentifiers ? ["Email/mobile conflict—manual review required"] : [])
       ],
-      status: score >= 80 && (exactStrongId || normalized[i].Name === normalized[j].Name)
+      status: strictHighConfidence ? "High confidence" : score >= 80 && (exactStrongId || exactName)
         ? "Likely match"
-        : "Review"
+        : "Review",
+      autoConfirmEligible: strictHighConfidence
     });
   }
 
-  return results.sort((a, b) => b.score - a.score);
+  // Auto-confirm eligibility requires a unique one-to-one candidate. If either
+  // record has another strict candidate, keep all competing pairs in manual review.
+  const strictLeftCounts = new Map<string, number>();
+  const strictRightCounts = new Map<string, number>();
+  for (const candidate of results) {
+    if (!candidate.autoConfirmEligible) continue;
+    strictLeftCounts.set(candidate.left.id, (strictLeftCounts.get(candidate.left.id) ?? 0) + 1);
+    strictRightCounts.set(candidate.right.id, (strictRightCounts.get(candidate.right.id) ?? 0) + 1);
+  }
+  return results.map((candidate) => {
+    if (!candidate.autoConfirmEligible) return candidate;
+    const unique = strictLeftCounts.get(candidate.left.id) === 1 && strictRightCounts.get(candidate.right.id) === 1;
+    return {
+      ...candidate,
+      autoConfirmEligible: unique,
+      status: unique ? "High confidence" : "Review",
+      reasons: unique
+        ? candidate.reasons
+        : [...candidate.reasons.filter((reason) => reason !== "Exact name + roll number + graduation year"), "Multiple competing candidates—manual review required"]
+    };
+  }).sort((a, b) => b.score - a.score);
 }
