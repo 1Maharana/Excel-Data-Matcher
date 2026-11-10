@@ -32,6 +32,7 @@ export default function Home() {
   const [matching, setMatching] = useState(false);
   const [selectedMatch, setSelectedMatch] = useState<string | null>(null);
   const [decisions, setDecisions] = useState<Record<string, ReviewDecision>>({});
+  const [selectedMatchIds, setSelectedMatchIds] = useState<string[]>([]);
   const [mapping, setMapping] = useState<Record<string, string>>({});
   const [showMapping, setShowMapping] = useState(false);
   const [collapseRepeatedSubmissions, setCollapseRepeatedSubmissions] = useState(false);
@@ -165,6 +166,37 @@ export default function Home() {
     return text.includes(query.toLowerCase()) &&
       (sourceFilter === "All files" || m.left.source === sourceFilter || m.right.source === sourceFilter);
   }), [matches, decisions, autoConfirmEnabled, query, sourceFilter]);
+
+  const approvedMatches = useMemo(() => matches.filter((m) => {
+    const decision = effectiveDecision(m);
+    return decision === "Confirmed same person" || decision === "Auto-confirmed same person";
+  }), [matches, decisions, autoConfirmEnabled]);
+
+  const selectedPendingMatches = useMemo(() => pendingMatches.filter((m) => selectedMatchIds.includes(m.id)), [pendingMatches, selectedMatchIds]);
+  const allPendingSelected = pendingMatches.length > 0 && pendingMatches.every((m) => selectedMatchIds.includes(m.id));
+
+  function toggleMatchSelection(id: string, checked: boolean) {
+    setSelectedMatchIds((current) => checked ? (current.includes(id) ? current : [...current, id]) : current.filter((item) => item !== id));
+  }
+
+  function selectAllPendingMatches() {
+    setSelectedMatchIds(pendingMatches.map((match) => match.id));
+  }
+
+  function approveSelectedMatches() {
+    const idsToApprove = selectedPendingMatches.map((match) => match.id);
+    if (!idsToApprove.length) return;
+    const crossFileCount = selectedPendingMatches.filter((match) => match.left.source !== match.right.source).length;
+    const withinFileCount = idsToApprove.length - crossFileCount;
+    const message = `Approve ${idsToApprove.length.toLocaleString()} selected candidate pairs?\n\n${crossFileCount.toLocaleString()} cross-file matches will become eligible for D1 approved enrichment.\n${withinFileCount.toLocaleString()} within-file pairs will be marked as confirmed duplicates for source-file consolidation.\n\nNo original rows will be deleted.`;
+    if (typeof window !== "undefined" && !window.confirm(message)) return;
+    setDecisions((current) => {
+      const next = { ...current };
+      for (const id of idsToApprove) next[id] = "Confirmed same person";
+      return next;
+    });
+    setSelectedMatchIds([]);
+  }
 
   const missingRecords = useMemo(() => filteredRecords.filter((r) =>
     Object.values(r.data).some((value) => !normalizeValue(value))
@@ -441,7 +473,7 @@ export default function Home() {
 
   function resetWorkspace() {
     setRecords([]); setQuery(""); setSourceFilter("All files"); setMissingOnly(false);
-    setDecisions({}); setSelectedMatch(null); setMapping({}); setError(""); setTab("records"); setCollapseRepeatedSubmissions(false); setAutoConfirmEnabled(false);
+    setDecisions({}); setSelectedMatchIds([]); setSelectedMatch(null); setMapping({}); setError(""); setTab("records"); setCollapseRepeatedSubmissions(false); setAutoConfirmEnabled(false);
     setMasterSource(""); setExportComposition("enriched"); setSelectedExportFields([]); setExportFieldsInitialized(false);
   }
 
@@ -630,10 +662,36 @@ export default function Home() {
         {tab === "records" && <RecordTable records={filteredRecords} columns={columns} pageSize={100} />}
         {tab === "matches" && (
           <section className="space-y-3">
+            <div className="rounded-2xl border border-indigo-100 bg-white p-4 shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="font-bold">Bulk approve match candidates</h2>
+                  <p className="mt-1 text-sm text-slate-500">Select candidates across all result pages, then approve them together. Cross-file approvals feed Approved Enrichment; within-file approvals confirm repeated submissions in that source.</p>
+                </div>
+                <span className="rounded-full bg-indigo-50 px-3 py-1.5 text-sm font-semibold text-indigo-700">{selectedPendingMatches.length.toLocaleString()} selected</span>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-slate-100 pt-3">
+                <label className="flex cursor-pointer items-center gap-2 text-sm font-medium text-slate-700">
+                  <input type="checkbox" checked={allPendingSelected} onChange={(e) => e.target.checked ? selectAllPendingMatches() : setSelectedMatchIds([])} className="h-4 w-4 accent-indigo-600" />
+                  Select all {pendingMatches.length.toLocaleString()} pending candidates (all pages)
+                </label>
+                <button className={buttonSecondary} onClick={() => setSelectedMatchIds([])} disabled={!selectedMatchIds.length}>Clear selection</button>
+                <button className={`${buttonBase} bg-emerald-600 text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40`} onClick={approveSelectedMatches} disabled={!selectedPendingMatches.length || matching}>Approve selected ({selectedPendingMatches.length.toLocaleString()})</button>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-500">
+                <span>{selectedPendingMatches.filter((m) => m.left.source !== m.right.source).length.toLocaleString()} cross-file → Approved Enrichment</span>
+                <span>{selectedPendingMatches.filter((m) => m.left.source === m.right.source).length.toLocaleString()} within-file → duplicate consolidation</span>
+                <span>{approvedMatches.length.toLocaleString()} already approved/auto-confirmed</span>
+              </div>
+            </div>
             {matching && <div className="rounded-xl border border-indigo-100 bg-indigo-50 p-4 text-sm text-indigo-800">Checking {comparisonGroups.records.length.toLocaleString()} comparison records for within-file duplicates and cross-file matches in the background. You can keep using the interface; results appear when the pass completes.</div>}
             {!matching && pendingMatches.length > 200 && <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">Showing the first 200 of {pendingMatches.length.toLocaleString()} pending candidates to keep the page responsive. Export matches to review the full candidate report, or narrow the list with search and filters.</div>}
             {pendingMatches.length === 0 ? <Empty title="No pending candidates" detail={sources.length < 1 ? "Import an Excel or CSV file to find possible duplicates." : "No candidates found. Check the column mapping or lower the threshold. Matching checks both duplicates within a file and common records across files."} /> :
               pendingMatches.map((m) => <article key={m.id} className="rounded-2xl border bg-white p-5 shadow-sm">
+                <div className="mb-3 flex items-center justify-between border-b border-slate-100 pb-3">
+                  <label className="flex cursor-pointer items-center gap-2 text-sm font-medium text-slate-600"><input type="checkbox" checked={selectedMatchIds.includes(m.id)} onChange={(e) => toggleMatchSelection(m.id, e.target.checked)} className="h-4 w-4 accent-indigo-600" />Select candidate</label>
+                  <span className="text-xs text-slate-400">{m.left.source === m.right.source ? "Within-file candidate" : "Cross-file candidate"}</span>
+                </div>
                 <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-start">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">

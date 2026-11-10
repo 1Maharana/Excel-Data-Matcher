@@ -93,3 +93,10 @@ Turn the toggle off to inspect and export original rows individually. Grouping i
 ## Configurable master export
 
 When two or more source files are loaded, the Export Master Configuration panel lets you choose the authoritative master source, select the dataset composition (D1 + unmatched D2 + approved enrichment, D1 + approved enrichment, or D1 only), choose export columns, and include original D1 values and enrichment status. Confirmed/auto-confirmed matches may enrich existing master records; pending candidates are never applied to the master and can be exported to a separate Pending_Review worksheet. Rejected candidates can also be included in a separate worksheet. The configured export is an Excel workbook with separate worksheets.
+
+
+## Bulk approval of match candidates
+
+In Match Review, use **Select all pending candidates (all pages)** to select every candidate matching the current search and source filters, including candidates beyond the 200 cards rendered on screen. You can also select individual visible candidates. Choose **Approve selected** and confirm the summary. Cross-file candidates are marked as confirmed and become eligible for the existing D1 **Approved Enrichment** export workflow. Within-file candidates are confirmed as repeated submissions within their source file; they are not treated as D2 enrichment. Original source rows are retained.
+
+Bulk approval is a manual decision. Review the selected candidates and conflicts before confirming; selecting all is not an identity-verification algorithm.
