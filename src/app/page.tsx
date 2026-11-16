@@ -5,6 +5,7 @@ import * as XLSX from "xlsx";
 import {
   canonicalHeader,
   compareRecords,
+  MATCH_FIELDS,
   comparisonValue,
   normalizeValue,
   standardFields,
@@ -26,6 +27,8 @@ export default function Home() {
   const [missingOnly, setMissingOnly] = useState(false);
   const [tab, setTab] = useState<Tab>("records");
   const [threshold, setThreshold] = useState(60);
+  const [selectedCompareFields, setSelectedCompareFields] = useState<string[]>(MATCH_FIELDS.map((field) => field.name));
+  const [showExportSettings, setShowExportSettings] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [matches, setMatches] = useState<ReturnType<typeof compareRecords>>([]);
@@ -139,9 +142,9 @@ export default function Home() {
       setMatching(false);
       worker.terminate();
     };
-    worker.postMessage({ records: comparisonGroups.records, threshold });
+    worker.postMessage({ records: comparisonGroups.records, threshold, selectedFields: selectedCompareFields });
     return () => worker.terminate();
-  }, [comparisonGroups, threshold, sources.length]);
+  }, [comparisonGroups, threshold, selectedCompareFields, sources.length]);
   // When consolidation is enabled, every record-facing section uses the same per-file
   // representative dataset as matching. This keeps All Records, Missing, Unmatched,
   // filtered exports, and Union Master consistent instead of showing duplicate source rows.
@@ -474,7 +477,7 @@ export default function Home() {
   function resetWorkspace() {
     setRecords([]); setQuery(""); setSourceFilter("All files"); setMissingOnly(false);
     setDecisions({}); setSelectedMatchIds([]); setSelectedMatch(null); setMapping({}); setError(""); setTab("records"); setCollapseRepeatedSubmissions(false); setAutoConfirmEnabled(false);
-    setMasterSource(""); setExportComposition("enriched"); setSelectedExportFields([]); setExportFieldsInitialized(false);
+    setMasterSource(""); setExportComposition("enriched"); setSelectedExportFields([]); setExportFieldsInitialized(false); setShowExportSettings(false); setSelectedCompareFields(MATCH_FIELDS.map((field) => field.name));
   }
 
   const tabItems: { id: Tab; label: string; count: number }[] = [
@@ -548,14 +551,21 @@ export default function Home() {
           <button className={buttonSecondary} onClick={() => setShowMapping((v) => !v)}>
             {showMapping ? "Hide column mapping" : "Map columns"}
           </button>
-          <button className={buttonSecondary} onClick={() => exportRecords(filteredRecords, "filtered-records.xlsx")}>Export Excel</button>
-          <button className={buttonSecondary} onClick={() => exportRows(filteredRecords.map((r) => { const members = comparisonGroups.membersByRepresentative.get(r.id) ?? [r]; return { "Source File": r.source, "Representative Source Row": r.rowNumber, "Repeated Submissions Grouped": members.length > 1 ? "Yes" : "No", "Submission Count": members.length, "Source Rows In Group": members.map((member) => `${member.source}: ${member.rowNumber}`).join("; "), ...r.data }; }), "filtered-records.csv")}>Export CSV</button>
-          <button className={buttonSecondary} onClick={exportMatches}>Export matches</button>
-          <button className={buttonSecondary} onClick={() => exportRecords(unmatchedRecords, "unmatched-records.xlsx")}>Export unmatched</button>
+          <button className={buttonPrimary} onClick={() => setShowExportSettings(true)}>Export</button>
         </section>
 
-        {records.length > 0 && sources.length > 1 && (
-          <section className="mb-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        {showExportSettings && (
+          <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/50 p-4 sm:p-8" onMouseDown={(e) => { if (e.target === e.currentTarget) setShowExportSettings(false); }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="export-settings-title" className="my-auto max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl sm:p-6">
+            <div className="mb-4 flex items-center justify-between gap-3"><div><h2 id="export-settings-title" className="text-lg font-bold">Export settings</h2><p className="mt-1 text-sm text-slate-500">Choose what you want to export and configure the workbook.</p></div><button className={buttonSecondary} onClick={() => setShowExportSettings(false)}>Close</button></div>
+            <div className="mb-5 flex flex-wrap gap-2 border-b border-slate-100 pb-5">
+              <button className={buttonSecondary} onClick={() => exportRecords(filteredRecords, "filtered-records.xlsx")}>Export filtered records (Excel)</button>
+              <button className={buttonSecondary} onClick={() => exportRows(filteredRecords.map((r) => { const members = comparisonGroups.membersByRepresentative.get(r.id) ?? [r]; return { "Source File": r.source, "Representative Source Row": r.rowNumber, "Repeated Submissions Grouped": members.length > 1 ? "Yes" : "No", "Submission Count": members.length, "Source Rows In Group": members.map((member) => `${member.source}: ${member.rowNumber}`).join("; "), ...r.data }; }), "filtered-records.csv")}>Export filtered records (CSV)</button>
+              <button className={buttonSecondary} onClick={exportMatches}>Export matches</button>
+              <button className={buttonSecondary} onClick={() => exportRecords(unmatchedRecords, "unmatched-records.xlsx")}>Export unmatched</button>
+            </div>
+            {records.length > 0 && sources.length > 1 && <>
+
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div><h2 className="text-lg font-bold">Export Master Configuration</h2><p className="mt-1 text-sm text-slate-500">Choose which datasets, fields and review worksheets to include in your export.</p></div>
               <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">Master-based</span>
@@ -595,9 +605,11 @@ export default function Home() {
               <h3 className="font-semibold">Export preview</h3>
               <div className="mt-2 space-y-2 text-sm"><div className="flex justify-between"><span className="text-slate-500">Master records</span><strong>{mappedRecords.filter((record) => record.source === masterSource).length.toLocaleString()}</strong></div><div className="flex justify-between"><span className="text-slate-500">Approved cross-file matches</span><strong>{matches.filter((match) => (effectiveDecision(match) === "Confirmed same person" || effectiveDecision(match) === "Auto-confirmed same person") && (match.left.source === masterSource || match.right.source === masterSource)).length.toLocaleString()}</strong></div><div className="flex justify-between"><span className="text-slate-500">Pending candidates in review sheet</span><strong>{matches.filter((match) => !decisions[match.id] && !(autoConfirmEnabled && match.autoConfirmEligible)).length.toLocaleString()}</strong></div><div className="flex justify-between"><span className="text-slate-500">Unmatched D2 included in master</span><strong>{exportComposition === "union" ? "Yes" : "No"}</strong></div><div className="flex justify-between"><span className="text-slate-500">Selected fields</span><strong>{selectedExportFields.length}</strong></div></div>
             </div>
-            <button disabled={!selectedExportFields.length || !masterSource} onClick={exportConfiguredMaster} className={`${buttonPrimary} mt-4 w-full disabled:cursor-not-allowed disabled:opacity-50`}>Export configured Excel workbook</button>
+            <button disabled={!selectedExportFields.length || !masterSource} onClick={() => { exportConfiguredMaster(); setShowExportSettings(false); }} className={`${buttonPrimary} mt-4 w-full disabled:cursor-not-allowed disabled:opacity-50`}>Export configured Excel workbook</button>
             <p className="mt-2 text-xs text-slate-500">Pending matches are exported to a separate worksheet when selected; they never enrich Final_Master. Only confirmed or eligible auto-confirmed matches enrich D1.</p>
+            </>}
           </section>
+          </div>
         )}
 
         {showMapping && (
@@ -639,6 +651,12 @@ export default function Home() {
 
         {tab === "matches" && (
           <section className="mb-4 rounded-2xl border bg-white p-5">
+            <div className="mb-5 rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="font-semibold">Fields to compare</h3><p className="mt-1 text-xs text-slate-500">Only checked fields are used by the existing matching algorithm.</p></div><div className="flex gap-3 text-xs"><button onClick={() => setSelectedCompareFields(MATCH_FIELDS.map((field) => field.name))} className="font-semibold text-indigo-700">Select all</button><button onClick={() => setSelectedCompareFields([])} className="font-semibold text-slate-500">Clear</button></div></div>
+              <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">{MATCH_FIELDS.map((field) => <label key={field.name} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={selectedCompareFields.includes(field.name)} onChange={(e) => setSelectedCompareFields((old) => e.target.checked ? [...old, field.name] : old.filter((name) => name !== field.name))} className="accent-indigo-600" />{field.name}{field.identifier && <span className="text-[10px] text-slate-400">ID</span>}</label>)}</div>
+              <p className="mt-2 text-xs text-slate-500">{selectedCompareFields.length} of {MATCH_FIELDS.length} comparison fields selected. Sl. No. is not a comparison field.</p>
+              {!selectedCompareFields.length && <p className="mt-2 text-xs font-semibold text-amber-700">Select at least one field to run comparison.</p>}
+            </div>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div><h2 className="font-bold">Match sensitivity</h2><p className="mt-1 text-sm text-slate-500">Raise the threshold to show stronger candidates only.</p></div>
               <span className="rounded-lg bg-indigo-50 px-3 py-1.5 text-sm font-bold text-indigo-700">{threshold}%</span>

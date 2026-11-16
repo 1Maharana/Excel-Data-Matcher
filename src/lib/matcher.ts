@@ -187,7 +187,7 @@ export function similarity(a: string, b: string): number {
   );
 }
 
-const MATCH_FIELDS = [
+export const MATCH_FIELDS = [
   { name: "Roll No", weight: 40, identifier: true },
   { name: "Mobile", weight: 35, identifier: true },
   { name: "Email", weight: 35, identifier: true },
@@ -267,13 +267,17 @@ function addToIndex(index: Map<string, number[]>, key: string, recordIndex: numb
   else index.set(key, [recordIndex]);
 }
 
-export function compareRecords(records: StudentRecord[], threshold = 60): MatchCandidate[] {
+export function compareRecords(records: StudentRecord[], threshold = 60, selectedFieldNames?: string[]): MatchCandidate[] {
   if (records.length < 2) return [];
+  const activeFields = selectedFieldNames === undefined
+    ? MATCH_FIELDS
+    : MATCH_FIELDS.filter((field) => selectedFieldNames.includes(field.name));
+  if (!activeFields.length) return [];
 
   // Cache normalized comparison values once; the source data itself is never changed.
   const normalized = records.map((record) => {
     const values: Record<string, string> = {};
-    for (const field of MATCH_FIELDS) {
+    for (const field of activeFields) {
       values[field.name] = comparisonValue(field.name, valueFor(record, field.name));
     }
     return values;
@@ -282,7 +286,7 @@ export function compareRecords(records: StudentRecord[], threshold = 60): MatchC
   const index = new Map<string, number[]>();
   records.forEach((_record, i) => {
     const values = normalized[i];
-    for (const field of MATCH_FIELDS) {
+    for (const field of activeFields) {
       const token = values[field.name];
       if (!token) continue;
       if (field.identifier) addToIndex(index, `${field.name}:${token}`, i);
@@ -337,7 +341,7 @@ export function compareRecords(records: StudentRecord[], threshold = 60): MatchC
     let exactStrongId = false;
     const reasons: string[] = [];
 
-    for (const field of MATCH_FIELDS) {
+    for (const field of activeFields) {
       const a = normalized[i][field.name];
       const b = normalized[j][field.name];
       if (!a || !b) continue;
