@@ -12,7 +12,7 @@ import {
 } from "@/lib/matcher";
 
 type Tab = "records" | "matches" | "missing" | "unmatched";
-type ReviewDecision = "Confirmed same person" | "Not a match";
+type ReviewDecision = "Confirmed same person" | "Not a match" | "Kept unchanged";
 type EffectiveDecision = ReviewDecision | "Auto-confirmed same person";
 
 const buttonBase = "rounded-xl px-3.5 py-2 text-sm font-semibold transition";
@@ -399,8 +399,11 @@ export default function Home() {
     }
 
     const selectedFields = selectedExportFields;
+    // Use the latest in-session records so manual edits made in Compare Records
+    // are reflected in the configured export, rather than stale candidate snapshots.
+    const currentRecordById = new Map(records.map((record) => [record.id, record]));
     const masterRows = masterRecords.map((master) => {
-      const donors = enrichments.get(master.id) ?? [];
+      const donors = (enrichments.get(master.id) ?? []).map((donor) => currentRecordById.get(donor.id) ?? donor);
       const output: Record<string, unknown> = {
         "Master Source File": master.source,
         "Master Source Row": master.rowNumber
@@ -708,6 +711,7 @@ export default function Home() {
                 <div className="mt-4 flex flex-wrap gap-2 border-t border-slate-100 pt-4">
                   <button className={`${buttonBase} bg-emerald-50 text-emerald-800 hover:bg-emerald-100`} onClick={() => setDecisions((d) => ({ ...d, [m.id]: "Confirmed same person" }))}>Confirm match</button>
                   <button className={`${buttonBase} bg-rose-50 text-rose-800 hover:bg-rose-100`} onClick={() => setDecisions((d) => ({ ...d, [m.id]: "Not a match" }))}>Not a match</button>
+                  <button className={`${buttonBase} border border-slate-200 bg-slate-100 text-slate-700 hover:bg-slate-200`} onClick={() => setDecisions((d) => ({ ...d, [m.id]: "Kept unchanged" }))}>Keep it same</button>
                 </div>
               </article>)}
           </section>
@@ -715,7 +719,25 @@ export default function Home() {
         {tab === "missing" && <RecordTable records={missingRecords} columns={columns} pageSize={100} />}
         {tab === "unmatched" && <RecordTable records={unmatchedRecords} columns={columns} pageSize={100} />}
 
-        {activeMatch && <CompareModal match={activeMatch} onClose={() => setSelectedMatch(null)} />}
+        {activeMatch && <CompareModal
+          match={activeMatch}
+          onClose={() => setSelectedMatch(null)}
+          onConfirm={(editedData) => {
+            setRecords((current) => current.map((record) =>
+              record.id === activeMatch.right.id ? { ...record, data: editedData } : record
+            ));
+            setDecisions((current) => ({ ...current, [activeMatch.id]: "Confirmed same person" }));
+            setSelectedMatch(null);
+          }}
+          onNotMatch={() => {
+            setDecisions((current) => ({ ...current, [activeMatch.id]: "Not a match" }));
+            setSelectedMatch(null);
+          }}
+          onKeepSame={() => {
+            setDecisions((current) => ({ ...current, [activeMatch.id]: "Kept unchanged" }));
+            setSelectedMatch(null);
+          }}
+        />}
         <footer className="mt-8 flex flex-col gap-1 border-t border-slate-200 pt-5 text-xs leading-5 text-slate-400 sm:flex-row sm:justify-between">
           <span>Excel Data Matcher · Standalone local-first tool</span>
           <span>Similarity scores are heuristics. Automatic confirmation is restricted to unique exact-identifier matches.</span>
@@ -767,43 +789,73 @@ function RecordTable({ records, columns, pageSize = 100 }: { records: StudentRec
   </section>;
 }
 
-function CompareModal({ match, onClose }: { match: ReturnType<typeof compareRecords>[number]; onClose: () => void }) {
+function CompareModal({
+  match,
+  onClose,
+  onConfirm,
+  onNotMatch,
+  onKeepSame
+}: {
+  match: ReturnType<typeof compareRecords>[number];
+  onClose: () => void;
+  onConfirm: (editedData: Record<string, string>) => void;
+  onNotMatch: () => void;
+  onKeepSame: () => void;
+}) {
   const fields = Array.from(new Set([...Object.keys(match.left.data), ...Object.keys(match.right.data)]));
+  const [editedData, setEditedData] = useState<Record<string, string>>({ ...match.right.data });
+
   return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-3 sm:p-6" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-    <section role="dialog" aria-modal="true" aria-labelledby="compare-title" className="max-h-[90vh] w-full max-w-6xl overflow-auto rounded-2xl bg-white p-5 shadow-2xl sm:p-7">
+    <section role="dialog" aria-modal="true" aria-labelledby="compare-title" className="max-h-[92vh] w-full max-w-6xl overflow-auto rounded-2xl bg-white p-5 shadow-2xl sm:p-7">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div><h2 id="compare-title" className="text-xl font-bold">Compare records</h2><p className="mt-1 text-sm text-slate-500">{match.score}% similarity · {match.reasons.join(" · ")}</p></div>
+        <div>
+          <h2 id="compare-title" className="text-xl font-bold">Compare records</h2>
+          <p className="mt-1 text-sm text-slate-500">{match.score}% similarity · {match.reasons.join(" · ")}</p>
+          <p className="mt-1 text-xs text-indigo-600">Record A is read-only. Edit or paste values into Record B as needed.</p>
+        </div>
         <button onClick={onClose} className={buttonSecondary}>Close</button>
       </div>
       <div className="mt-5 grid gap-4 md:grid-cols-2">
-        {[match.left, match.right].map((record, index) => <div key={record.id} className="rounded-xl border border-slate-200 p-4">
-          <h3 className="font-bold">{index === 0 ? "Record A" : "Record B"}</h3><p className="mt-1 break-all text-xs text-slate-500">{record.source} · row {record.rowNumber}</p>
+        <div className="rounded-xl border border-slate-200 p-4">
+          <h3 className="font-bold">Record A · Original</h3>
+          <p className="mt-1 break-all text-xs text-slate-500">{match.left.source} · row {match.left.rowNumber}</p>
           {fields.map((field) => {
-            const a = normalizeValue(match.left.data[field] || "");
-            const b = normalizeValue(match.right.data[field] || "");
-            const value = record.data[field] || "";
-            const bothPresent = Boolean(a && b);
+            const value = match.left.data[field] || "";
+            const b = normalizeValue(editedData[field] || "");
+            const a = normalizeValue(value);
             const different = a !== b;
-            const equivalentAfterNormalization = different && bothPresent &&
-              comparisonValue(field, a) === comparisonValue(field, b);
-            const realConflict = different && bothPresent && !equivalentAfterNormalization;
-            const missingOnOneSide = !a || !b;
-            const tone = equivalentAfterNormalization ? "bg-emerald-50" : realConflict ? "bg-amber-50" : "bg-slate-50";
-            const detail = equivalentAfterNormalization
-              ? " · equivalent after normalization"
-              : realConflict
-                ? " · differs"
-                : missingOnOneSide && different
-                  ? " · missing on one side"
-                  : "";
-            return <div key={field} className={`mt-3 rounded-lg p-2 ${tone}`}>
-              <p className="text-xs font-semibold text-slate-500">{field}{detail}</p>
+            return <div key={field} className={`mt-3 rounded-lg p-2 ${different ? "bg-amber-50" : "bg-slate-50"}`}>
+              <p className="text-xs font-semibold text-slate-500">{field}{different ? " · differs" : ""}</p>
               <p className="mt-1 break-words text-sm">{value || <span className="text-amber-700">Missing</span>}</p>
             </div>;
           })}
-        </div>)}
+        </div>
+        <div className="rounded-xl border border-indigo-200 p-4">
+          <h3 className="font-bold">Record B · Editable</h3>
+          <p className="mt-1 break-all text-xs text-slate-500">{match.right.source} · row {match.right.rowNumber}</p>
+          {fields.map((field) => {
+            const a = normalizeValue(match.left.data[field] || "");
+            const b = normalizeValue(editedData[field] || "");
+            const different = a !== b;
+            return <label key={field} className={`mt-3 block rounded-lg p-2 ${different ? "bg-amber-50" : "bg-slate-50"}`}>
+              <span className="text-xs font-semibold text-slate-600">{field}{different ? " · differs / edited" : ""}</span>
+              <textarea
+                rows={Math.min(4, Math.max(1, Math.ceil((editedData[field] || "").length / 55)))}
+                value={editedData[field] ?? ""}
+                onChange={(event) => setEditedData((current) => ({ ...current, [field]: event.target.value }))}
+                placeholder="Paste or enter value..."
+                className="mt-1 w-full resize-y rounded-md border border-slate-200 bg-white px-2.5 py-2 text-sm text-slate-900 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
+              />
+            </label>;
+          })}
+        </div>
       </div>
-      <p className="mt-4 text-xs leading-5 text-slate-400">Review the original source and identifiers before confirming a match. A similarity score alone does not establish identity.</p>
+      <p className="mt-4 text-xs leading-5 text-slate-500">Confirm match saves the edited Record B values and marks the pair as the same person. Both source rows remain in the dataset. Not a match and Keep it same do not modify either record.</p>
+      <div className="mt-5 flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-4">
+        <button className={`${buttonBase} bg-rose-50 text-rose-800 hover:bg-rose-100`} onClick={onNotMatch}>Not a match</button>
+        <button className={`${buttonBase} border border-slate-200 bg-slate-100 text-slate-700 hover:bg-slate-200`} onClick={onKeepSame}>Keep it same</button>
+        <button className={buttonPrimary} onClick={() => onConfirm(editedData)}>Confirm match &amp; save Record B</button>
+      </div>
     </section>
   </div>;
 }
