@@ -32,6 +32,8 @@ export default function Home() {
   const [showExportSettings, setShowExportSettings] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [importProgress, setImportProgress] = useState(0);
+  const [importStatus, setImportStatus] = useState("");
   const [matches, setMatches] = useState<ReturnType<typeof compareRecords>>([]);
   const [matching, setMatching] = useState(false);
   const [selectedMatch, setSelectedMatch] = useState<string | null>(null);
@@ -243,35 +245,61 @@ export default function Home() {
     if (!fileList?.length) return;
     setLoading(true);
     setError("");
-    try {
-      const imported: StudentRecord[] = [];
-      for (const file of Array.from(fileList)) {
-        const ext = file.name.split(".").pop()?.toLowerCase();
-        if (!["xlsx", "xls", "csv"].includes(ext ?? "")) throw new Error(`${file.name} is not an Excel or CSV file.`);
-        const buffer = await file.arrayBuffer();
-        const workbook = XLSX.read(buffer, { type: "array", cellDates: true });
-        const sheetName = workbook.SheetNames[0];
-        const sheet = sheetName ? workbook.Sheets[sheetName] : undefined;
-        if (!sheet) continue;
-        const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "", raw: false });
-        rows.forEach((row, index) => {
-          const data: Record<string, string> = {};
-          for (const [header, value] of Object.entries(row)) data[header.trim() || "Unnamed column"] = normalizeValue(value);
-          imported.push({
-            id: `${file.name}:${index + 2}:${crypto.randomUUID()}`,
-            source: file.name,
-            rowNumber: index + 2,
-            data
-          });
-        });
-      }
-      if (!imported.length) throw new Error("No data rows found. Check that the first worksheet has a header row and records.");
-      setRecords((old) => [...old, ...imported]);
-      setTab("records");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not read these files.");
-    } finally {
+    setImportProgress(0);
+    setImportStatus("Preparing spreadsheets…");
+    const files = Array.from(fileList);
+    const invalid = files.find((file) => !["xlsx", "xls", "csv"].includes(file.name.split(".").pop()?.toLowerCase() ?? ""));
+    if (invalid) {
+      setError(`${invalid.name} is not an Excel or CSV file.`);
       setLoading(false);
+      setImportStatus("");
+      return;
+    }
+
+    const imported: StudentRecord[] = [];
+    const worker = new Worker(new URL("../workers/import.worker.ts", import.meta.url), { type: "module" });
+    let settled = false;
+    const finish = (message?: string) => {
+      if (settled) return;
+      settled = true;
+      worker.terminate();
+      if (message) setError(message);
+      setLoading(false);
+      setImportStatus("");
+    };
+    worker.onmessage = (event: MessageEvent<{
+      type: "progress" | "batch" | "done" | "error";
+      fileName?: string; fileIndex?: number; fileCount?: number; rowsRead?: number; totalRows?: number;
+      records?: StudentRecord[]; totalImported?: number; message?: string;
+    }>) => {
+      const data = event.data;
+      if (data.type === "batch" && data.records) {
+        imported.push(...data.records);
+      } else if (data.type === "progress") {
+        const fileFraction = data.totalRows ? data.rowsRead! / data.totalRows : 1;
+        const overall = ((data.fileIndex! + fileFraction) / data.fileCount!) * 100;
+        setImportProgress(Math.min(99, Math.round(overall)));
+        setImportStatus(`Reading ${data.fileName} · ${data.rowsRead?.toLocaleString()} of ${data.totalRows?.toLocaleString()} rows`);
+      } else if (data.type === "done") {
+        if (!imported.length) {
+          finish("No data rows found. Check that the first worksheet has a header row and records.");
+          return;
+        }
+        setRecords((old) => [...old, ...imported]);
+        setTab("records");
+        setImportProgress(100);
+        finish();
+      } else if (data.type === "error") {
+        finish(data.message || "Could not read these files.");
+      }
+    };
+    worker.onerror = () => finish("Spreadsheet import failed in the background worker. Try saving the workbook as .xlsx or .csv and importing again.");
+    try {
+      // File/Blob objects are structured-cloned efficiently; the worker reads
+      // one workbook at a time so multiple large uploads do not duplicate buffers.
+      worker.postMessage({ files });
+    } catch (error) {
+      finish(error instanceof Error ? error.message : "Could not load the selected files.");
     }
   }
 
@@ -519,7 +547,7 @@ export default function Home() {
     const d2Count = mappedRecords.filter((r) => r.source === selectedD2Source).length;
     const linkedD1 = new Set(pairMatches.filter((m) => { const d = effectiveDecision(m); return d === "Confirmed same person" || d === "Auto-confirmed same person"; }).map((m) => m.left.source === masterSource ? m.left.id : m.right.id)).size;
     const linkedD2 = new Set(pairMatches.filter((m) => { const d = effectiveDecision(m); return d === "Confirmed same person" || d === "Auto-confirmed same person"; }).map((m) => m.left.source === selectedD2Source ? m.left.id : m.right.id)).size;
-    return <VisualizationWorkspace masterSource={masterSource} d2Source={selectedD2Source} sources={sources} onD1Change={setMasterSource} onD2Change={setSelectedD2Source} onBack={() => setTab("matches")} d1Count={d1Count} d2Count={d2Count} candidateCount={pairMatches.length} confirmedCount={pairApproved} pendingCount={pairPending} rejectedCount={pairRejected} unmatchedD1={Math.max(0, d1Count - linkedD1)} unmatchedD2={Math.max(0, d2Count - linkedD2)} relationships={pairMatches.map((match) => ({ ...match, status: effectiveDecision(match) }))} />;
+    return <VisualizationWorkspace masterSource={masterSource} d2Source={selectedD2Source} sources={sources} onD1Change={setMasterSource} onD2Change={setSelectedD2Source} onBack={() => setTab("matches")} d1Count={d1Count} d2Count={d2Count} candidateCount={pairMatches.length} confirmedCount={pairApproved} pendingCount={pairPending} rejectedCount={pairRejected} unmatchedD1={Math.max(0, d1Count - linkedD1)} unmatchedD2={Math.max(0, d2Count - linkedD2)} relationships={pairMatches.map((match) => ({ ...match, status: effectiveDecision(match) ?? match.status }))} />;
   }
 
   return (
@@ -550,7 +578,11 @@ export default function Home() {
                 onChange={(e) => { void importFiles(e.target.files); e.currentTarget.value = ""; }} />
             </label>
           </div>
-          <p className="mt-3 text-xs text-slate-400">Files are processed in your browser. Matching runs in a background worker; large datasets may still require substantial browser memory.</p>
+          <p className="mt-3 text-xs text-slate-400">Files are parsed in a background worker in 1,000-row batches. Matching also runs off the main thread, so large imports do not freeze the page.</p>
+          {loading && <div className="mt-3 rounded-xl border border-indigo-100 bg-indigo-50/70 p-3" role="status" aria-live="polite">
+            <div className="mb-2 flex items-center justify-between gap-3 text-xs font-semibold text-indigo-900"><span>{importStatus || "Importing records…"}</span><span>{importProgress}%</span></div>
+            <div className="h-2 overflow-hidden rounded-full bg-indigo-100"><div className="h-full rounded-full bg-indigo-600 transition-[width] duration-300" style={{ width: `${importProgress}%` }} /></div>
+          </div>}
           <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-xl border border-indigo-100 bg-indigo-50/60 p-3">
             <input type="checkbox" checked={collapseRepeatedSubmissions} onChange={(e) => setCollapseRepeatedSubmissions(e.target.checked)} className="mt-1 accent-indigo-600" />
             <span>
@@ -820,7 +852,7 @@ function Empty({ title, detail }: { title: string; detail: string }) {
 function VisualizationWorkspace({ masterSource, d2Source, sources, onD1Change, onD2Change, onBack, d1Count, d2Count, candidateCount, confirmedCount, pendingCount, rejectedCount, unmatchedD1, unmatchedD2, relationships }: {
   masterSource: string; d2Source: string; sources: string[]; onD1Change: (value: string) => void; onD2Change: (value: string) => void; onBack: () => void;
   d1Count: number; d2Count: number; candidateCount: number; confirmedCount: number; pendingCount: number; rejectedCount: number; unmatchedD1: number; unmatchedD2: number;
-  relationships: Array<ReturnType<typeof compareRecords>[number] & { status: string }>;
+  relationships: Array<Omit<ReturnType<typeof compareRecords>[number], "status"> & { status: string }>;
 }) {
   const [mode, setMode] = useState<"all" | "confirmed" | "pending" | "rejected">("all");
   const [inspected, setInspected] = useState<(typeof relationships)[number] | null>(null);

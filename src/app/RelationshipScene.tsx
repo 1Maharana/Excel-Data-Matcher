@@ -94,7 +94,42 @@ export default function RelationshipScene({ relationships, mode, onInspect }: {
       const edgeGeometry = new THREE.BufferGeometry();
       edgeGeometry.setAttribute("position", new THREE.Float32BufferAttribute(edges, 3));
       edgeGeometry.setAttribute("color", new THREE.Float32BufferAttribute(edgeBase.flat(), 3));
-      const edgeMaterial = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.34, depthWrite: false });
+      // A travelling mint pulse moves from D1 toward D2, with a subtle
+      // second beat. The base network stays visible but subdued.
+      const edgeMaterial = new THREE.ShaderMaterial({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        vertexColors: true,
+        uniforms: { uTime: { value: 0 } },
+        vertexShader: `
+          attribute vec3 color;
+          varying vec3 vColor;
+          varying float vX;
+          void main() {
+            vColor = color;
+            vX = position.x;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform float uTime;
+          varying vec3 vColor;
+          varying float vX;
+          void main() {
+            float phase = mod(uTime, 2.8) / 2.8;
+            float head = mix(-5.8, 5.8, phase);
+            float secondPhase = fract(phase + 0.16);
+            float secondHead = mix(-5.8, 5.8, secondPhase);
+            float pulseA = exp(-pow((vX - head) * 2.4, 2.0));
+            float pulseB = exp(-pow((vX - secondHead) * 2.4, 2.0)) * 0.55;
+            float pulse = clamp(pulseA + pulseB, 0.0, 1.0);
+            vec3 color = mix(vColor, vec3(0.68, 1.0, 0.82), pulse * 0.9);
+            float alpha = 0.23 + pulse * 0.72;
+            gl_FragColor = vec4(color * (0.8 + pulse * 1.4), alpha);
+          }
+        `,
+      });
       const lineSegments = new THREE.LineSegments(edgeGeometry, edgeMaterial);
       lineSegments.userData.kind = "edges";
       scene.add(lineSegments);
@@ -192,7 +227,15 @@ export default function RelationshipScene({ relationships, mode, onInspect }: {
       const onResize = () => { if (!host) return; camera.aspect = host.clientWidth / Math.max(1, host.clientHeight); camera.updateProjectionMatrix(); renderer.setSize(host.clientWidth, host.clientHeight); };
       window.addEventListener("resize", onResize);
       let frame = 0;
-      const animate = () => { frame = requestAnimationFrame(animate); scene.rotation.y += (rotationY - scene.rotation.y) * 0.06; scene.rotation.x += (rotationX - scene.rotation.x) * 0.06; camera.position.z += (zoom - camera.position.z) * 0.08; renderer.render(scene, camera); };
+      const clock = new THREE.Clock();
+      const animate = () => {
+        frame = requestAnimationFrame(animate);
+        edgeMaterial.uniforms.uTime.value = clock.getElapsedTime();
+        scene.rotation.y += (rotationY - scene.rotation.y) * 0.06;
+        scene.rotation.x += (rotationX - scene.rotation.x) * 0.06;
+        camera.position.z += (zoom - camera.position.z) * 0.08;
+        renderer.render(scene, camera);
+      };
       animate();
       cleanup = () => { cancelAnimationFrame(frame); window.removeEventListener("resize", onResize); renderer.domElement.removeEventListener("pointermove", onPointerMove); renderer.domElement.removeEventListener("pointerdown", onPointerDown); renderer.domElement.removeEventListener("pointerup", onPointerUp); renderer.domElement.removeEventListener("pointercancel", onPointerUp); renderer.domElement.removeEventListener("click", onClick); renderer.domElement.removeEventListener("wheel", onWheel); scene.traverse(obj => { if (obj instanceof THREE.Mesh || obj instanceof THREE.Points || obj instanceof THREE.LineSegments) { obj.geometry.dispose(); const mat = obj.material; if (Array.isArray(mat)) mat.forEach(m => m.dispose()); else mat.dispose(); } }); renderer.dispose(); renderer.domElement.remove(); };
     }).catch((error) => { console.error("Three.js visualization failed to initialize", error); });

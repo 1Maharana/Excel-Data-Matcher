@@ -307,7 +307,9 @@ export function compareRecords(records: StudentRecord[], threshold = 60, selecte
   // Generate both cross-file matches and within-file duplicate candidates.
   // Buckets with too many records are skipped to avoid quadratic explosions.
   // Identifier buckets are inserted first, so the strongest evidence is prioritized.
-  const pairs = new Set<string>();
+  // Numeric pair keys use far less memory than allocating hundreds of thousands
+  // of "i:j" strings on large alumni workbooks.
+  const pairs = new Set<number>();
   const MAX_PAIRS_PER_BUCKET = 20_000;
   const MAX_TOTAL_CANDIDATE_PAIRS = 250_000;
 
@@ -321,7 +323,7 @@ export function compareRecords(records: StudentRecord[], threshold = 60, selecte
         if (pairs.size >= MAX_TOTAL_CANDIDATE_PAIRS) break;
         const i = Math.min(bucket[a], bucket[b]);
         const j = Math.max(bucket[a], bucket[b]);
-        if (i !== j) pairs.add(`${i}:${j}`);
+        if (i !== j) pairs.add(i * records.length + j);
       }
       if (pairs.size >= MAX_TOTAL_CANDIDATE_PAIRS) break;
     }
@@ -330,9 +332,8 @@ export function compareRecords(records: StudentRecord[], threshold = 60, selecte
 
   const results: MatchCandidate[] = [];
   for (const pair of pairs) {
-    const separator = pair.indexOf(":");
-    const i = Number(pair.slice(0, separator));
-    const j = Number(pair.slice(separator + 1));
+    const i = Math.floor(pair / records.length);
+    const j = pair - i * records.length;
     const left = records[i];
     const right = records[j];
     let points = 0;
