@@ -41,6 +41,7 @@ export default function Home() {
   const [collapseRepeatedSubmissions, setCollapseRepeatedSubmissions] = useState(false);
   const [autoConfirmEnabled, setAutoConfirmEnabled] = useState(false);
   const [masterSource, setMasterSource] = useState("");
+  const [selectedD2Source, setSelectedD2Source] = useState("");
   const [exportComposition, setExportComposition] = useState<"union" | "enriched" | "original">("enriched");
   const [selectedExportFields, setSelectedExportFields] = useState<string[]>([]);
   const [exportFieldsInitialized, setExportFieldsInitialized] = useState(false);
@@ -54,7 +55,10 @@ export default function Home() {
   const sources = useMemo(() => Array.from(new Set(records.map((r) => r.source))), [records]);
   useEffect(() => {
     if (sources.length && (!masterSource || !sources.includes(masterSource))) setMasterSource(sources[0]);
-  }, [sources, masterSource]);
+    const availableD2 = sources.find((source) => source !== masterSource);
+    if (sources.length > 1 && (!selectedD2Source || !sources.includes(selectedD2Source) || selectedD2Source === masterSource)) setSelectedD2Source(availableD2 ?? "");
+    if (sources.length < 2) setSelectedD2Source("");
+  }, [sources, masterSource, selectedD2Source]);
   const mappedRecords = useMemo(() => records.map((r) => {
     const data: Record<string, string> = {};
     for (const [key, value] of Object.entries(r.data)) {
@@ -117,10 +121,15 @@ export default function Home() {
     return { records: representatives, membersByRepresentative };
   }, [mappedRecords, collapseRepeatedSubmissions]);
 
+  const comparisonRecords = useMemo(() => {
+    if (!masterSource || !selectedD2Source || masterSource === selectedD2Source) return comparisonGroups.records;
+    return comparisonGroups.records.filter((record) => record.source === masterSource || record.source === selectedD2Source);
+  }, [comparisonGroups.records, masterSource, selectedD2Source]);
+
   // Run the expensive matching pass off the main UI thread. This keeps search,
   // scrolling, and the rest of the interface responsive on large workbooks.
   useEffect(() => {
-    if (comparisonGroups.records.length < 2) {
+    if (comparisonRecords.length < 2) {
       setMatches([]);
       setMatching(false);
       return;
@@ -142,9 +151,9 @@ export default function Home() {
       setMatching(false);
       worker.terminate();
     };
-    worker.postMessage({ records: comparisonGroups.records, threshold, selectedFields: selectedCompareFields });
+    worker.postMessage({ records: comparisonRecords, threshold, selectedFields: selectedCompareFields });
     return () => worker.terminate();
-  }, [comparisonGroups, threshold, selectedCompareFields, sources.length]);
+  }, [comparisonRecords, threshold, selectedCompareFields, sources.length]);
   // When consolidation is enabled, every record-facing section uses the same per-file
   // representative dataset as matching. This keeps All Records, Missing, Unmatched,
   // filtered exports, and Union Master consistent instead of showing duplicate source rows.
@@ -184,6 +193,17 @@ export default function Home() {
 
   function selectAllPendingMatches() {
     setSelectedMatchIds(pendingMatches.map((match) => match.id));
+  }
+
+  function rejectSelectedMatches() {
+    const idsToReject = selectedPendingMatches.map((match) => match.id);
+    if (!idsToReject.length) return;
+    const crossFileCount = selectedPendingMatches.filter((match) => match.left.source !== match.right.source).length;
+    const withinFileCount = idsToReject.length - crossFileCount;
+    const message = `Mark ${idsToReject.length.toLocaleString()} selected candidate pairs as NOT a match?\n\n${crossFileCount.toLocaleString()} cross-file pairs will be kept separate.\n${withinFileCount.toLocaleString()} within-file pairs will remain separate submissions.\n\nNo original rows will be changed or deleted.`;
+    if (typeof window !== "undefined" && !window.confirm(message)) return;
+    setDecisions((current) => { const next = { ...current }; for (const id of idsToReject) next[id] = "Not a match"; return next; });
+    setSelectedMatchIds([]);
   }
 
   function approveSelectedMatches() {
@@ -378,7 +398,8 @@ export default function Home() {
 
   function exportConfiguredMaster() {
     if (!masterSource) { setError("Choose the master source file first."); return; }
-    const incomingSources = sources.filter((source) => source !== masterSource);
+    if (!selectedD2Source || selectedD2Source === masterSource) { setError("Choose a different D2 dataset."); return; }
+    const incomingSources = [selectedD2Source];
     const masterRecords = mappedRecords.filter((record) => record.source === masterSource);
     if (!masterRecords.length) { setError("No records were found in the selected master source."); return; }
     if (!selectedExportFields.length) { setError("Select at least one field to export."); return; }
@@ -477,7 +498,7 @@ export default function Home() {
   function resetWorkspace() {
     setRecords([]); setQuery(""); setSourceFilter("All files"); setMissingOnly(false);
     setDecisions({}); setSelectedMatchIds([]); setSelectedMatch(null); setMapping({}); setError(""); setTab("records"); setCollapseRepeatedSubmissions(false); setAutoConfirmEnabled(false);
-    setMasterSource(""); setExportComposition("enriched"); setSelectedExportFields([]); setExportFieldsInitialized(false); setShowExportSettings(false); setSelectedCompareFields(MATCH_FIELDS.map((field) => field.name));
+    setMasterSource(""); setSelectedD2Source(""); setExportComposition("enriched"); setSelectedExportFields([]); setExportFieldsInitialized(false); setShowExportSettings(false); setSelectedCompareFields(MATCH_FIELDS.map((field) => field.name));
   }
 
   const tabItems: { id: Tab; label: string; count: number }[] = [
@@ -533,6 +554,15 @@ export default function Home() {
           <Stat label="Reviewed / auto-confirmed" value={Object.keys(decisions).length + (autoConfirmEnabled ? matches.filter((m) => m.autoConfirmEligible && !decisions[m.id]).length : 0)} note="Manual decisions + eligible automatic confirmations" />
         </section>
 
+        {sources.length > 1 && <section className="mb-5 rounded-2xl border border-indigo-100 bg-white p-4 shadow-sm">
+          <div className="mb-3"><h2 className="font-bold">Choose datasets to compare</h2><p className="mt-1 text-sm text-slate-500">Select the master dataset (D1) and the incoming dataset (D2). Match review and the relationship visualisation will focus on this pair.</p></div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="text-sm font-medium">D1 · Master dataset<select value={masterSource} onChange={(e) => setMasterSource(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2">{sources.map((source) => <option key={source} value={source}>{source}</option>)}</select></label>
+            <label className="text-sm font-medium">D2 · Incoming dataset<select value={selectedD2Source} onChange={(e) => setSelectedD2Source(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2">{sources.filter((source) => source !== masterSource).map((source) => <option key={source} value={source}>{source}</option>)}</select></label>
+          </div>
+          <p className="mt-2 text-xs text-slate-500">Currently comparing {comparisonRecords.length.toLocaleString()} records across the selected pair. Other imported files remain available in All Records but are not included in this comparison pass.</p>
+        </section>}
+
         {records.length > 0 && (
           <section className="mb-4 rounded-xl border border-indigo-100 bg-indigo-50/70 px-4 py-3 text-sm text-indigo-950">
             <strong>{sources.length === 1 ? "Single-file inspection" : "Multi-file comparison"}</strong>
@@ -576,7 +606,7 @@ export default function Home() {
                   {sources.map((source) => <option key={source} value={source}>{source}</option>)}
                 </select>
               </label>
-              <div className="text-sm"><span className="font-medium">Incoming dataset(s) (D2)</span><p className="mt-1 rounded-lg bg-slate-50 px-3 py-2 text-slate-600">{sources.filter((source) => source !== masterSource).join(", ") || "No incoming files selected"}</p></div>
+              <label className="text-sm font-medium">Incoming dataset (D2)<select value={selectedD2Source} onChange={(e) => setSelectedD2Source(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2">{sources.filter((source) => source !== masterSource).map((source) => <option key={source} value={source}>{source}</option>)}</select></label>
             </div>
             <div className="mt-5">
               <h3 className="font-semibold">Choose dataset composition</h3>
@@ -694,7 +724,8 @@ export default function Home() {
                   Select all {pendingMatches.length.toLocaleString()} pending candidates (all pages)
                 </label>
                 <button className={buttonSecondary} onClick={() => setSelectedMatchIds([])} disabled={!selectedMatchIds.length}>Clear selection</button>
-                <button className={`${buttonBase} bg-emerald-600 text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40`} onClick={approveSelectedMatches} disabled={!selectedPendingMatches.length || matching}>Approve selected ({selectedPendingMatches.length.toLocaleString()})</button>
+                <button className={`${buttonBase} bg-emerald-600 text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40`} onClick={approveSelectedMatches} disabled={!selectedPendingMatches.length || matching}>Bulk approve ({selectedPendingMatches.length.toLocaleString()})</button>
+                <button className={`${buttonBase} bg-rose-600 text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-40`} onClick={rejectSelectedMatches} disabled={!selectedPendingMatches.length || matching}>Bulk not a match ({selectedPendingMatches.length.toLocaleString()})</button>
               </div>
               <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-500">
                 <span>{selectedPendingMatches.filter((m) => m.left.source !== m.right.source).length.toLocaleString()} cross-file → Approved Enrichment</span>
@@ -702,7 +733,23 @@ export default function Home() {
                 <span>{approvedMatches.length.toLocaleString()} already approved/auto-confirmed</span>
               </div>
             </div>
-            {matching && <div className="rounded-xl border border-indigo-100 bg-indigo-50 p-4 text-sm text-indigo-800">Checking {comparisonGroups.records.length.toLocaleString()} comparison records for within-file duplicates and cross-file matches in the background. You can keep using the interface; results appear when the pass completes.</div>}
+            <section className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-950 p-4 text-white shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2"><div><h2 className="font-bold">D1 ↔ D2 relationship map</h2><p className="mt-1 text-xs text-slate-300">A spatial overview of how records connect across the selected datasets.</p></div><div className="flex gap-3 text-xs"><span className="text-sky-300">● D1</span><span className="text-fuchsia-300">● D2</span><span className="text-emerald-300">━ Confirmed</span><span className="text-amber-300">┄ Pending</span></div></div>
+              <div className="mt-3 overflow-x-auto rounded-xl bg-slate-900/80 p-2" style={{ perspective: "900px" }}>
+                <div className="relative mx-auto h-[230px] min-w-[520px] max-w-4xl" style={{ transform: "rotateX(10deg) rotateY(-7deg)", transformStyle: "preserve-3d" }}>
+                  <div className="absolute inset-x-8 bottom-5 h-28 rounded-[50%] border border-slate-700/70" style={{ transform: "rotateX(68deg) translateZ(-25px)", background: "radial-gradient(ellipse, rgba(99,102,241,.16), rgba(15,23,42,0) 70%)" }} />
+                  <div className="absolute left-4 top-3 text-xs font-bold text-sky-300">D1 · {masterSource || "Master"}</div><div className="absolute right-4 top-3 text-xs font-bold text-fuchsia-300">D2 · {selectedD2Source || "Incoming"}</div>
+                  <svg viewBox="0 0 800 210" className="absolute inset-0 h-full w-full" aria-label="Relationship connections between D1 and D2">
+                    {matches.slice(0, 80).filter((m) => m.left.source !== m.right.source).map((m, index) => { const confirmed = effectiveDecision(m) === "Confirmed same person" || effectiveDecision(m) === "Auto-confirmed same person"; const rejected = effectiveDecision(m) === "Not a match"; const y1 = 35 + ((index * 47) % 145); const y2 = 35 + ((index * 71 + Math.round(m.score)) % 145); return <line key={m.id} x1="115" y1={y1} x2="685" y2={y2} stroke={rejected ? "#64748b" : confirmed ? "#34d399" : "#fbbf24"} strokeWidth={confirmed ? 2.4 : 1.3} strokeDasharray={rejected ? "2 6" : confirmed ? "none" : "6 5"} opacity={rejected ? .2 : .68} />; })}
+                    {Array.from({ length: Math.min(12, Math.max(3, Math.ceil(mappedRecords.filter((r) => r.source === masterSource).length / 100))) }, (_, i) => <circle key={`a${i}`} cx="115" cy={28 + i * 14} r="4.5" fill="#38bdf8" stroke="#e0f2fe" strokeWidth="1" />)}
+                    {Array.from({ length: Math.min(12, Math.max(3, Math.ceil(mappedRecords.filter((r) => r.source === selectedD2Source).length / 100))) }, (_, i) => <circle key={`b${i}`} cx="685" cy={28 + i * 14} r="4.5" fill="#e879f9" stroke="#fae8ff" strokeWidth="1" />)}
+                  </svg>
+                  <div className="absolute bottom-1 left-1/2 -translate-x-1/2 rounded-full border border-slate-700 bg-slate-900/90 px-3 py-1 text-[10px] text-slate-300">Connections represent candidate pairs · visual sample capped at 80 links</div>
+                </div>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4"><div className="rounded-lg bg-slate-900 p-3"><div className="text-xs text-slate-400">D1 records</div><div className="mt-1 text-xl font-bold text-sky-300">{mappedRecords.filter((r) => r.source === masterSource).length.toLocaleString()}</div></div><div className="rounded-lg bg-slate-900 p-3"><div className="text-xs text-slate-400">D2 records</div><div className="mt-1 text-xl font-bold text-fuchsia-300">{mappedRecords.filter((r) => r.source === selectedD2Source).length.toLocaleString()}</div></div><div className="rounded-lg bg-slate-900 p-3"><div className="text-xs text-slate-400">Candidate links</div><div className="mt-1 text-xl font-bold">{matches.filter((m) => m.left.source !== m.right.source).length.toLocaleString()}</div></div><div className="rounded-lg bg-slate-900 p-3"><div className="text-xs text-slate-400">Confirmed links</div><div className="mt-1 text-xl font-bold text-emerald-300">{approvedMatches.filter((m) => m.left.source !== m.right.source).length.toLocaleString()}</div></div></div>
+            </section>
+            {matching && <div className="rounded-xl border border-indigo-100 bg-indigo-50 p-4 text-sm text-indigo-800">Checking {comparisonRecords.length.toLocaleString()} comparison records for within-file duplicates and cross-file matches in the background. You can keep using the interface; results appear when the pass completes.</div>}
             {!matching && pendingMatches.length > 200 && <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">Showing the first 200 of {pendingMatches.length.toLocaleString()} pending candidates to keep the page responsive. Export matches to review the full candidate report, or narrow the list with search and filters.</div>}
             {pendingMatches.length === 0 ? <Empty title="No pending candidates" detail={sources.length < 1 ? "Import an Excel or CSV file to find possible duplicates." : "No candidates found. Check the column mapping or lower the threshold. Matching checks both duplicates within a file and common records across files."} /> :
               pendingMatches.map((m) => <article key={m.id} className="rounded-2xl border bg-white p-5 shadow-sm">
