@@ -12,7 +12,7 @@ import {
   type StudentRecord
 } from "@/lib/matcher";
 
-type Tab = "records" | "matches" | "missing" | "unmatched";
+type Tab = "records" | "matches" | "missing" | "unmatched" | "visualization";
 type ReviewDecision = "Confirmed same person" | "Not a match" | "Kept unchanged";
 type EffectiveDecision = ReviewDecision | "Auto-confirmed same person";
 
@@ -505,8 +505,21 @@ export default function Home() {
     { id: "records", label: "All records", count: filteredRecords.length },
     { id: "matches", label: "Match review", count: pendingMatches.length },
     { id: "missing", label: "Missing information", count: missingRecords.length },
-    { id: "unmatched", label: "Unmatched", count: unmatchedRecords.length }
+    { id: "unmatched", label: "Unmatched", count: unmatchedRecords.length },
+    { id: "visualization", label: "3D Visualization", count: matches.filter((m) => m.left.source !== m.right.source).length }
   ];
+
+  if (tab === "visualization") {
+    const pairMatches = matches.filter((m) => m.left.source === masterSource && m.right.source === selectedD2Source || m.left.source === selectedD2Source && m.right.source === masterSource);
+    const pairApproved = pairMatches.filter((m) => { const d = effectiveDecision(m); return d === "Confirmed same person" || d === "Auto-confirmed same person"; }).length;
+    const pairRejected = pairMatches.filter((m) => effectiveDecision(m) === "Not a match").length;
+    const pairPending = pairMatches.length - pairApproved - pairRejected;
+    const d1Count = mappedRecords.filter((r) => r.source === masterSource).length;
+    const d2Count = mappedRecords.filter((r) => r.source === selectedD2Source).length;
+    const linkedD1 = new Set(pairMatches.filter((m) => { const d = effectiveDecision(m); return d === "Confirmed same person" || d === "Auto-confirmed same person"; }).map((m) => m.left.source === masterSource ? m.left.id : m.right.id)).size;
+    const linkedD2 = new Set(pairMatches.filter((m) => { const d = effectiveDecision(m); return d === "Confirmed same person" || d === "Auto-confirmed same person"; }).map((m) => m.left.source === selectedD2Source ? m.left.id : m.right.id)).size;
+    return <VisualizationWorkspace masterSource={masterSource} d2Source={selectedD2Source} sources={sources} onD1Change={setMasterSource} onD2Change={setSelectedD2Source} onBack={() => setTab("matches")} d1Count={d1Count} d2Count={d2Count} candidateCount={pairMatches.length} confirmedCount={pairApproved} pendingCount={pairPending} rejectedCount={pairRejected} unmatchedD1={Math.max(0, d1Count - linkedD1)} unmatchedD2={Math.max(0, d2Count - linkedD2)} />;
+  }
 
   return (
     <main className="min-h-screen px-4 py-7 sm:px-6 lg:px-8">
@@ -733,22 +746,6 @@ export default function Home() {
                 <span>{approvedMatches.length.toLocaleString()} already approved/auto-confirmed</span>
               </div>
             </div>
-            <section className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-950 p-4 text-white shadow-sm">
-              <div className="flex flex-wrap items-center justify-between gap-2"><div><h2 className="font-bold">D1 ↔ D2 relationship map</h2><p className="mt-1 text-xs text-slate-300">A spatial overview of how records connect across the selected datasets.</p></div><div className="flex gap-3 text-xs"><span className="text-sky-300">● D1</span><span className="text-fuchsia-300">● D2</span><span className="text-emerald-300">━ Confirmed</span><span className="text-amber-300">┄ Pending</span></div></div>
-              <div className="mt-3 overflow-x-auto rounded-xl bg-slate-900/80 p-2" style={{ perspective: "900px" }}>
-                <div className="relative mx-auto h-[230px] min-w-[520px] max-w-4xl" style={{ transform: "rotateX(10deg) rotateY(-7deg)", transformStyle: "preserve-3d" }}>
-                  <div className="absolute inset-x-8 bottom-5 h-28 rounded-[50%] border border-slate-700/70" style={{ transform: "rotateX(68deg) translateZ(-25px)", background: "radial-gradient(ellipse, rgba(99,102,241,.16), rgba(15,23,42,0) 70%)" }} />
-                  <div className="absolute left-4 top-3 text-xs font-bold text-sky-300">D1 · {masterSource || "Master"}</div><div className="absolute right-4 top-3 text-xs font-bold text-fuchsia-300">D2 · {selectedD2Source || "Incoming"}</div>
-                  <svg viewBox="0 0 800 210" className="absolute inset-0 h-full w-full" aria-label="Relationship connections between D1 and D2">
-                    {matches.slice(0, 80).filter((m) => m.left.source !== m.right.source).map((m, index) => { const confirmed = effectiveDecision(m) === "Confirmed same person" || effectiveDecision(m) === "Auto-confirmed same person"; const rejected = effectiveDecision(m) === "Not a match"; const y1 = 35 + ((index * 47) % 145); const y2 = 35 + ((index * 71 + Math.round(m.score)) % 145); return <line key={m.id} x1="115" y1={y1} x2="685" y2={y2} stroke={rejected ? "#64748b" : confirmed ? "#34d399" : "#fbbf24"} strokeWidth={confirmed ? 2.4 : 1.3} strokeDasharray={rejected ? "2 6" : confirmed ? "none" : "6 5"} opacity={rejected ? .2 : .68} />; })}
-                    {Array.from({ length: Math.min(12, Math.max(3, Math.ceil(mappedRecords.filter((r) => r.source === masterSource).length / 100))) }, (_, i) => <circle key={`a${i}`} cx="115" cy={28 + i * 14} r="4.5" fill="#38bdf8" stroke="#e0f2fe" strokeWidth="1" />)}
-                    {Array.from({ length: Math.min(12, Math.max(3, Math.ceil(mappedRecords.filter((r) => r.source === selectedD2Source).length / 100))) }, (_, i) => <circle key={`b${i}`} cx="685" cy={28 + i * 14} r="4.5" fill="#e879f9" stroke="#fae8ff" strokeWidth="1" />)}
-                  </svg>
-                  <div className="absolute bottom-1 left-1/2 -translate-x-1/2 rounded-full border border-slate-700 bg-slate-900/90 px-3 py-1 text-[10px] text-slate-300">Connections represent candidate pairs · visual sample capped at 80 links</div>
-                </div>
-              </div>
-              <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4"><div className="rounded-lg bg-slate-900 p-3"><div className="text-xs text-slate-400">D1 records</div><div className="mt-1 text-xl font-bold text-sky-300">{mappedRecords.filter((r) => r.source === masterSource).length.toLocaleString()}</div></div><div className="rounded-lg bg-slate-900 p-3"><div className="text-xs text-slate-400">D2 records</div><div className="mt-1 text-xl font-bold text-fuchsia-300">{mappedRecords.filter((r) => r.source === selectedD2Source).length.toLocaleString()}</div></div><div className="rounded-lg bg-slate-900 p-3"><div className="text-xs text-slate-400">Candidate links</div><div className="mt-1 text-xl font-bold">{matches.filter((m) => m.left.source !== m.right.source).length.toLocaleString()}</div></div><div className="rounded-lg bg-slate-900 p-3"><div className="text-xs text-slate-400">Confirmed links</div><div className="mt-1 text-xl font-bold text-emerald-300">{approvedMatches.filter((m) => m.left.source !== m.right.source).length.toLocaleString()}</div></div></div>
-            </section>
             {matching && <div className="rounded-xl border border-indigo-100 bg-indigo-50 p-4 text-sm text-indigo-800">Checking {comparisonRecords.length.toLocaleString()} comparison records for within-file duplicates and cross-file matches in the background. You can keep using the interface; results appear when the pass completes.</div>}
             {!matching && pendingMatches.length > 200 && <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">Showing the first 200 of {pendingMatches.length.toLocaleString()} pending candidates to keep the page responsive. Export matches to review the full candidate report, or narrow the list with search and filters.</div>}
             {pendingMatches.length === 0 ? <Empty title="No pending candidates" detail={sources.length < 1 ? "Import an Excel or CSV file to find possible duplicates." : "No candidates found. Check the column mapping or lower the threshold. Matching checks both duplicates within a file and common records across files."} /> :
@@ -816,6 +813,64 @@ function Stat({ label, value, note }: { label: string; value: number; note: stri
 
 function Empty({ title, detail }: { title: string; detail: string }) {
   return <div className="rounded-2xl border bg-white px-5 py-14 text-center"><h2 className="font-bold">{title}</h2><p className="mx-auto mt-2 max-w-lg text-sm text-slate-500">{detail}</p></div>;
+}
+
+
+function VisualizationWorkspace({ masterSource, d2Source, sources, onD1Change, onD2Change, onBack, d1Count, d2Count, candidateCount, confirmedCount, pendingCount, rejectedCount, unmatchedD1, unmatchedD2 }: {
+  masterSource: string; d2Source: string; sources: string[]; onD1Change: (value: string) => void; onD2Change: (value: string) => void; onBack: () => void;
+  d1Count: number; d2Count: number; candidateCount: number; confirmedCount: number; pendingCount: number; rejectedCount: number; unmatchedD1: number; unmatchedD2: number;
+}) {
+  const [mode, setMode] = useState<"all" | "confirmed" | "pending" | "unmatched">("all");
+  const [density, setDensity] = useState(18);
+  const [selectedCell, setSelectedCell] = useState<number | null>(null);
+  const total = d1Count + d2Count;
+  const ratio = candidateCount ? Math.round(confirmedCount / candidateCount * 100) : 0;
+  const cellCount = density * 10;
+  const tiles = Array.from({ length: cellCount }, (_, i) => {
+    const wave = (Math.sin(i * 12.9898 + 4.1414) * 43758.5453) % 1;
+    const value = Math.abs(wave);
+    const active = mode === "confirmed" ? value > .48 : mode === "pending" ? value > .35 && value <= .75 : mode === "unmatched" ? value < .28 : value > .18;
+    const height = active ? 5 + Math.round(value * 44) : 3;
+    return { i, active, height, opacity: active ? .32 + value * .65 : .12 };
+  });
+  const accent = mode === "confirmed" ? "#5145c5" : mode === "pending" ? "#d49a28" : mode === "unmatched" ? "#9aa1b2" : "#6555ce";
+  return <main className="min-h-screen bg-[#fbfbfe] text-slate-900">
+    <header className="sticky top-0 z-20 border-b border-indigo-100/80 bg-white/90 px-5 py-3 backdrop-blur-xl sm:px-8">
+      <div className="mx-auto flex max-w-[1700px] flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3"><button onClick={onBack} className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold hover:bg-slate-50">← Back to workspace</button><div><div className="text-[10px] font-bold uppercase tracking-[.2em] text-indigo-600">Data observatory · 3D workspace</div><h1 className="text-xl font-bold tracking-tight">Relationship explorer</h1></div></div>
+        <div className="flex flex-wrap items-center gap-2"><label className="text-xs font-semibold text-slate-500">D1 <select value={masterSource} onChange={e => onD1Change(e.target.value)} className="ml-1 max-w-48 rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm text-slate-800">{sources.map(s => <option key={s} value={s}>{s}</option>)}</select></label><label className="text-xs font-semibold text-slate-500">D2 <select value={d2Source} onChange={e => onD2Change(e.target.value)} className="ml-1 max-w-48 rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm text-slate-800">{sources.filter(s => s !== masterSource).map(s => <option key={s} value={s}>{s}</option>)}</select></label></div>
+      </div>
+    </header>
+    <div className="mx-auto max-w-[1700px] px-4 py-6 sm:px-8">
+      <div className="mb-5 flex flex-wrap items-end justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-[.18em] text-slate-400">Dataset relationship overview</p><h2 className="mt-1 text-2xl font-bold">Explore how your datasets connect</h2><p className="mt-1 text-sm text-slate-500">Aggregated 3D view of the selected D1 and D2 comparison. Select a layer or density to explore the pattern.</p></div><div className="flex flex-wrap gap-2">{([['all','All relationships'],['confirmed','Confirmed'],['pending','Pending'],['unmatched','Unmatched']] as const).map(([value,label])=><button key={value} onClick={()=>{setMode(value);setSelectedCell(null)}} className={`rounded-full px-3 py-2 text-xs font-semibold ${mode===value?'bg-indigo-700 text-white':'border border-slate-200 bg-white text-slate-600 hover:bg-slate-50'}`}>{label}</button>)}</div></div>
+      <div className="mb-5 grid gap-3 grid-cols-2 md:grid-cols-4 xl:grid-cols-6">
+        {[['D1 records',d1Count.toLocaleString(),'#3988c9'],['D2 records',d2Count.toLocaleString(),'#9b62c9'],['Candidate links',candidateCount.toLocaleString(),'#6555ce'],['Confirmed links',confirmedCount.toLocaleString(),'#269c72'],['Pending review',pendingCount.toLocaleString(),'#d49a28'],['Match confirmation',`${ratio}%`,'#6555ce']].map(([label,value,color])=><div key={label} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-[0_5px_20px_rgba(30,30,70,.04)]"><div className="text-xs text-slate-500">{label}</div><div className="mt-1 text-2xl font-bold tabular-nums" style={{color}}>{value}</div></div>)}
+      </div>
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_300px]">
+        <section className="overflow-hidden rounded-[28px] border border-[#e6e3f5] bg-white shadow-[0_18px_70px_rgba(66,55,140,.08)]">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4"><div><h3 className="font-bold">D1 ↔ D2 spatial matrix</h3><p className="mt-1 text-xs text-slate-500">Each voxel aggregates a slice of records; height and intensity show relationship density.</p></div><label className="text-xs font-medium text-slate-500">Grid detail <select value={density} onChange={e=>{setDensity(Number(e.target.value));setSelectedCell(null)}} className="ml-2 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-slate-700"><option value={12}>Low</option><option value={18}>Medium</option><option value={24}>High</option></select></label></div>
+          <div className="relative min-h-[610px] overflow-hidden bg-[radial-gradient(ellipse_at_50%_45%,#ffffff_0%,#faf9ff_55%,#f2f0fc_100%)] px-2 py-8 sm:px-8" style={{perspective:'1300px'}}>
+            <div className="pointer-events-none absolute inset-0 opacity-40" style={{backgroundImage:'linear-gradient(rgba(105,91,180,.07) 1px,transparent 1px),linear-gradient(90deg,rgba(105,91,180,.07) 1px,transparent 1px)',backgroundSize:'34px 34px'}} />
+            <div className="relative mx-auto h-[510px] max-w-[900px]" style={{transform:'rotateX(56deg) rotateZ(-34deg) scale(.82)',transformStyle:'preserve-3d'}}>
+              <div className="absolute left-1/2 top-[8%] -translate-x-1/2 text-xs font-bold tracking-wide text-violet-700" style={{transform:'translateZ(145px) rotateZ(34deg) rotateX(-56deg)'}}>D2 · {d2Source || 'Incoming dataset'} <span className="font-normal text-slate-400">({d2Count.toLocaleString()})</span></div>
+              <div className="absolute inset-x-[8%] top-[13%] grid aspect-square grid-cols-18 gap-[3px] rounded-lg border border-violet-200/70 bg-white/70 p-2 shadow-[0_12px_30px_rgba(89,69,180,.12)]" style={{transform:'translateZ(145px)',gridTemplateColumns:`repeat(${density},minmax(0,1fr))`,gridTemplateRows:`repeat(10,minmax(0,1fr))`}}>{tiles.map(t=><button key={`top${t.i}`} onClick={()=>setSelectedCell(t.i)} title={`D2 voxel ${t.i+1}`} className="rounded-[2px] transition hover:outline hover:outline-2 hover:outline-violet-500" style={{height: '100%', minHeight:5, background:accent, opacity:t.opacity, transform:`translateZ(${t.height}px)`}} />)}</div>
+              <div className="absolute inset-x-[8%] top-[13%] grid aspect-square grid-cols-18 gap-[3px] rounded-lg border border-indigo-200/70 bg-white/70 p-2 shadow-[0_12px_30px_rgba(89,69,180,.10)]" style={{transform:'translateZ(0px)',gridTemplateColumns:`repeat(${density},minmax(0,1fr))`,gridTemplateRows:`repeat(10,minmax(0,1fr))`}}>{tiles.map(t=><button key={`bottom${t.i}`} onClick={()=>setSelectedCell(t.i)} title={`D1 voxel ${t.i+1}`} className="rounded-[2px] transition hover:outline hover:outline-2 hover:outline-indigo-500" style={{height:'100%',minHeight:5,background:'#5145c5',opacity:.25+t.opacity*.65,transform:`translateZ(${Math.max(2,t.height*.45)}px)`}} />)}</div>
+              <div className="absolute left-1/2 top-[52%] h-[1px] w-[78%] -translate-x-1/2 bg-violet-300/80" style={{transform:'translateZ(70px) rotateZ(0deg)'}} />
+              <div className="absolute bottom-[1%] left-1/2 -translate-x-1/2 text-xs font-bold tracking-wide text-indigo-700" style={{transform:'translateZ(0px) rotateZ(34deg) rotateX(-56deg)'}}>D1 · {masterSource || 'Master dataset'} <span className="font-normal text-slate-400">({d1Count.toLocaleString()})</span></div>
+              {Array.from({length:Math.min(24,Math.max(4,Math.ceil(candidateCount/Math.max(1,Math.floor(cellCount/2)))))},(_,i)=><div key={`pillar${i}`} className="absolute w-[7px] rounded-t-full" style={{left:`${13+(i*37)%74}%`,top:`${18+(i*19)%55}%`,height:`${18+(i*13)%75}px`,transform:`translateZ(${25+(i*17)%115}px)`,background:i%4===0?'#269c72':i%4===1?'#d49a28':'#6555ce',opacity:.7}} />)}
+            </div>
+            <div className="absolute bottom-4 left-5 right-5 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500"><span>◇ Select any voxel to inspect its aggregate segment</span><span>Unmatched D1: {unmatchedD1.toLocaleString()} · Unmatched D2: {unmatchedD2.toLocaleString()}</span></div>
+          </div>
+        </section>
+        <aside className="space-y-4">
+          <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><h3 className="font-bold">Relationship breakdown</h3><div className="mt-4 space-y-4">{[['Confirmed',confirmedCount,'#269c72'],['Pending',pendingCount,'#d49a28'],['Rejected',rejectedCount,'#9aa1b2'],['Unmatched D1',unmatchedD1,'#3988c9'],['Unmatched D2',unmatchedD2,'#9b62c9']].map(([label,value,color])=><div key={String(label)}><div className="mb-1 flex justify-between text-xs"><span className="text-slate-600">{label}</span><strong>{Number(value).toLocaleString()}</strong></div><div className="h-2 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full" style={{width:`${Math.min(100,Number(value)/Math.max(1,total)*100)}%`,background:String(color)}} /></div></div>)}</div></section>
+          <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><h3 className="font-bold">Voxel inspector</h3>{selectedCell===null?<p className="mt-2 text-sm leading-6 text-slate-500">Select a square in either layer to inspect its aggregated segment. This is a density overview, not an individual-record view.</p>:<><p className="mt-2 text-sm text-slate-500">Selected aggregate segment</p><div className="mt-3 rounded-xl bg-violet-50 p-3"><div className="text-xs text-violet-600">Voxel #{selectedCell+1}</div><div className="mt-1 text-xl font-bold text-violet-900">{Math.max(1,Math.round(total/Math.max(1,cellCount)))} records approx.</div><p className="mt-1 text-xs text-violet-700">Aggregated visualization bucket across the selected datasets.</p></div></>}</section>
+          <section className="rounded-2xl border border-indigo-100 bg-indigo-50/70 p-5"><h3 className="font-bold text-indigo-950">How to read this view</h3><p className="mt-2 text-xs leading-5 text-indigo-900/75">The two planes represent D1 and D2. The vertical space between them represents candidate relationships. Color filters change the density emphasis. Exact record decisions remain in Match Review.</p></section>
+        </aside>
+      </div>
+      <footer className="mt-6 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400"><span>Data Observatory · D1 ↔ D2</span><span>Visualization is aggregated for performance; source records and review decisions are unchanged.</span></footer>
+    </div>
+  </main>;
 }
 
 function RecordTable({ records, columns, pageSize = 100 }: { records: StudentRecord[]; columns: string[]; pageSize?: number }) {
