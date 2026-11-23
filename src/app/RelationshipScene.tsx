@@ -1,11 +1,15 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import type { StudentRecord } from "@/lib/matcher";
 
 type Rel = {
-  left: { id: string; rowNumber: number; data: Record<string, string> };
-  right: { id: string; rowNumber: number; data: Record<string, string> };
+  id: string;
+  left: StudentRecord;
+  right: StudentRecord;
   score: number;
+  reasons: string[];
+  autoConfirmEligible: boolean;
   status: string;
 };
 
@@ -80,59 +84,57 @@ export default function RelationshipScene({ relationships, mode, onInspect }: {
 
       const edges: number[] = [];
       const edgeColors: number[] = [];
-      const edgeBase: Array<[number, number, number]> = [];
-      const edgeHot: Array<[number, number, number]> = [];
       const colorFor = (status: string) => status === "Confirmed same person" || status === "Auto-confirmed same person" ? new THREE.Color("#baffd5") : status === "Not a match" ? new THREE.Color("#ff7185") : new THREE.Color("#8dd6ae");
       plotted.forEach((r, i) => {
         const a = d1Map.get(r.left.id)!.position;
         const b = d2Map.get(r.right.id)!.position;
         edges.push(a.x, a.y, a.z, b.x, b.y, b.z);
         const c = colorFor(r.status);
-        edgeBase.push([c.r * 0.45, c.g * 0.45, c.b * 0.45], [c.r * 0.45, c.g * 0.45, c.b * 0.45]);
-        edgeHot.push([c.r, c.g, c.b], [c.r, c.g, c.b]);
       });
       const edgeGeometry = new THREE.BufferGeometry();
       edgeGeometry.setAttribute("position", new THREE.Float32BufferAttribute(edges, 3));
-      edgeGeometry.setAttribute("color", new THREE.Float32BufferAttribute(edgeBase.flat(), 3));
-      // A travelling mint pulse moves from D1 toward D2, with a subtle
-      // second beat. The base network stays visible but subdued.
-      const edgeMaterial = new THREE.ShaderMaterial({
+      const initialEdgeColors = plotted.flatMap((r) => { const c = colorFor(r.status); return [c.r * 0.78, c.g * 0.78, c.b * 0.78, c.r * 0.78, c.g * 0.78, c.b * 0.78]; });
+      edgeGeometry.setAttribute("color", new THREE.Float32BufferAttribute(initialEdgeColors, 3));
+      // Use Three.js' built-in line material for dependable visibility across GPUs.
+      // A separate moving-points layer supplies the heartbeat travelling along each edge.
+      const edgeMaterial = new THREE.LineBasicMaterial({
+        vertexColors: true,
         transparent: true,
+        opacity: 0.58,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
-        vertexColors: true,
-        uniforms: { uTime: { value: 0 } },
-        vertexShader: `
-          attribute vec3 color;
-          varying vec3 vColor;
-          varying float vX;
-          void main() {
-            vColor = color;
-            vX = position.x;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-          }
-        `,
-        fragmentShader: `
-          uniform float uTime;
-          varying vec3 vColor;
-          varying float vX;
-          void main() {
-            float phase = mod(uTime, 2.8) / 2.8;
-            float head = mix(-5.8, 5.8, phase);
-            float secondPhase = fract(phase + 0.16);
-            float secondHead = mix(-5.8, 5.8, secondPhase);
-            float pulseA = exp(-pow((vX - head) * 2.4, 2.0));
-            float pulseB = exp(-pow((vX - secondHead) * 2.4, 2.0)) * 0.55;
-            float pulse = clamp(pulseA + pulseB, 0.0, 1.0);
-            vec3 color = mix(vColor, vec3(0.68, 1.0, 0.82), pulse * 0.9);
-            float alpha = 0.23 + pulse * 0.72;
-            gl_FragColor = vec4(color * (0.8 + pulse * 1.4), alpha);
-          }
-        `,
       });
       const lineSegments = new THREE.LineSegments(edgeGeometry, edgeMaterial);
       lineSegments.userData.kind = "edges";
       scene.add(lineSegments);
+
+      const pulseCount = plotted.length * 2;
+      const pulsePositions = new Float32Array(pulseCount * 3);
+      const pulseColors = new Float32Array(pulseCount * 3);
+      for (let i = 0; i < plotted.length; i++) {
+        const c = colorFor(plotted[i].status);
+        for (let beat = 0; beat < 2; beat++) {
+          const k = (i * 2 + beat) * 3;
+          pulseColors[k] = 0.72;
+          pulseColors[k + 1] = 1.0;
+          pulseColors[k + 2] = 0.84;
+        }
+      }
+      const pulseGeometry = new THREE.BufferGeometry();
+      pulseGeometry.setAttribute("position", new THREE.BufferAttribute(pulsePositions, 3));
+      pulseGeometry.setAttribute("color", new THREE.BufferAttribute(pulseColors, 3));
+      const pulseMaterial = new THREE.PointsMaterial({
+        size: 0.18,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.98,
+        depthWrite: false,
+        sizeAttenuation: true,
+        blending: THREE.AdditiveBlending,
+      });
+      const pulsePoints = new THREE.Points(pulseGeometry, pulseMaterial);
+      pulsePoints.userData.kind = "pulses";
+      scene.add(pulsePoints);
 
       const nodeMeshes: Array<{ mesh: InstanceType<typeof THREE.Mesh>; ids: string[]; side: "d1" | "d2" }> = [];
       const makeNodes = (ids: string[], map: typeof d1Map, side: "d1" | "d2") => {
@@ -180,6 +182,16 @@ export default function RelationshipScene({ relationships, mode, onInspect }: {
         });
         edgeGeometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
         edgeGeometry.attributes.color.needsUpdate = true;
+        const pulseTint: number[] = [];
+        plotted.forEach((r, i) => {
+          const related = index === i || (node && (node.side === "d1" ? r.left.id === node.id : r.right.id === node.id));
+          const alpha = related ? 1 : (index !== null || node ? 0.025 : 1);
+          for (let beat = 0; beat < 2; beat++) pulseTint.push(0.72 * alpha, 1.0 * alpha, 0.84 * alpha);
+        });
+        pulseGeometry.setAttribute("color", new THREE.Float32BufferAttribute(pulseTint, 3));
+        pulseGeometry.attributes.color.needsUpdate = true;
+        pulseMaterial.opacity = (index !== null || node) ? 0.95 : 0.88;
+        edgeMaterial.opacity = (index !== null || node) ? 0.38 : 0.58;
         nodeMeshes.forEach(({ mesh, ids, side }) => ids.forEach((id, i) => {
           const isHot = node?.side === side && node.id === id;
           const isConnected = index !== null && (side === "d1" ? plotted[index]?.left.id === id : plotted[index]?.right.id === id);
@@ -230,10 +242,39 @@ export default function RelationshipScene({ relationships, mode, onInspect }: {
       const clock = new THREE.Clock();
       const animate = () => {
         frame = requestAnimationFrame(animate);
-        edgeMaterial.uniforms.uTime.value = clock.getElapsedTime();
         scene.rotation.y += (rotationY - scene.rotation.y) * 0.06;
         scene.rotation.x += (rotationX - scene.rotation.x) * 0.06;
         camera.position.z += (zoom - camera.position.z) * 0.08;
+        const elapsed = clock.getElapsedTime();
+        const pulseAttr = pulseGeometry.getAttribute("position");
+        for (let i = 0; i < plotted.length; i++) {
+          const r = plotted[i];
+          const a = d1Map.get(r.left.id)!.position;
+          const b = d2Map.get(r.right.id)!.position;
+          // Two close pulses travel D1 → D2, followed by a short resting beat.
+          // Stagger each edge slightly so the whole network feels alive, not synchronized.
+          const cycle = 2.5;
+          const travel = 0.95;
+          const phase = (elapsed + (i * 0.61803398875) % cycle) % cycle;
+          const firstActive = phase < travel;
+          const secondPhase = phase - 0.14;
+          const secondActive = secondPhase >= 0 && secondPhase < travel;
+          if (firstActive) {
+            const t = phase / travel;
+            pulseAttr.setXYZ(i * 2,
+              a.x + (b.x - a.x) * t,
+              a.y + (b.y - a.y) * t,
+              a.z + (b.z - a.z) * t);
+          } else pulseAttr.setXYZ(i * 2, 0, -1000, 0);
+          if (secondActive) {
+            const t = secondPhase / travel;
+            pulseAttr.setXYZ(i * 2 + 1,
+              a.x + (b.x - a.x) * t,
+              a.y + (b.y - a.y) * t,
+              a.z + (b.z - a.z) * t);
+          } else pulseAttr.setXYZ(i * 2 + 1, 0, -1000, 0);
+        }
+        pulseAttr.needsUpdate = true;
         renderer.render(scene, camera);
       };
       animate();
