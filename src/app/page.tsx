@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
-import RelationshipScene from "./RelationshipScene";
 import {
   canonicalHeader,
   compareRecords,
@@ -10,10 +9,11 @@ import {
   comparisonValue,
   normalizeValue,
   standardFields,
-  type StudentRecord
+  type StudentRecord,
+  type NormalizationRule
 } from "@/lib/matcher";
 
-type Tab = "records" | "matches" | "missing" | "unmatched" | "visualization";
+type Tab = "records" | "matches" | "missing" | "unmatched" | "normalization";
 type ReviewDecision = "Confirmed same person" | "Not a match" | "Kept unchanged";
 type EffectiveDecision = ReviewDecision | "Auto-confirmed same person";
 
@@ -32,8 +32,6 @@ export default function Home() {
   const [showExportSettings, setShowExportSettings] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [importProgress, setImportProgress] = useState(0);
-  const [importStatus, setImportStatus] = useState("");
   const [matches, setMatches] = useState<ReturnType<typeof compareRecords>>([]);
   const [matching, setMatching] = useState(false);
   const [selectedMatch, setSelectedMatch] = useState<string | null>(null);
@@ -53,6 +51,31 @@ export default function Home() {
   const [includeReviewSheets, setIncludeReviewSheets] = useState(true);
   const [includeRejectedSheet, setIncludeRejectedSheet] = useState(true);
   const [includeMatchedSheet, setIncludeMatchedSheet] = useState(true);
+  const [normalizationRules, setNormalizationRules] = useState<NormalizationRule[]>([]);
+  const [normalizationHistory, setNormalizationHistory] = useState<{id:string; at:string; action:string; field:string; from:string; to:string; scope:string}[]>([]);
+  const [ruleField, setRuleField] = useState("Degree");
+  const [ruleFrom, setRuleFrom] = useState("");
+  const [ruleTo, setRuleTo] = useState("");
+  const [ruleScope, setRuleScope] = useState("global");
+  const [ruleTestValue, setRuleTestValue] = useState("");
+  const [ruleTab, setRuleTab] = useState<"rules" | "suggestions" | "history">("rules");
+  const [normalizationLoaded, setNormalizationLoaded] = useState(false);
+  const [editingRuleId, setEditingRuleId] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      const savedRules = localStorage.getItem("edm-normalization-rules-v1");
+      const savedHistory = localStorage.getItem("edm-normalization-history-v1");
+      if (savedRules) setNormalizationRules(JSON.parse(savedRules) as NormalizationRule[]);
+      if (savedHistory) setNormalizationHistory(JSON.parse(savedHistory) as typeof normalizationHistory);
+    } catch { /* Ignore malformed local settings; source records remain untouched. */ }
+    setNormalizationLoaded(true);
+  }, []);
+  useEffect(() => {
+    if (!normalizationLoaded) return;
+    localStorage.setItem("edm-normalization-rules-v1", JSON.stringify(normalizationRules));
+    localStorage.setItem("edm-normalization-history-v1", JSON.stringify(normalizationHistory));
+  }, [normalizationRules, normalizationHistory, normalizationLoaded]);
 
   const sourceColumns = useMemo(() => Array.from(new Set(records.flatMap((r) => Object.keys(r.data)))), [records]);
   const sources = useMemo(() => Array.from(new Set(records.map((r) => r.source))), [records]);
@@ -154,9 +177,9 @@ export default function Home() {
       setMatching(false);
       worker.terminate();
     };
-    worker.postMessage({ records: comparisonRecords, threshold, selectedFields: selectedCompareFields });
+    worker.postMessage({ records: comparisonRecords, threshold, selectedFields: selectedCompareFields, normalizationRules });
     return () => worker.terminate();
-  }, [comparisonRecords, threshold, selectedCompareFields, sources.length]);
+  }, [comparisonRecords, threshold, selectedCompareFields, normalizationRules, sources.length]);
   // When consolidation is enabled, every record-facing section uses the same per-file
   // representative dataset as matching. This keeps All Records, Missing, Unmatched,
   // filtered exports, and Union Master consistent instead of showing duplicate source rows.
@@ -245,61 +268,35 @@ export default function Home() {
     if (!fileList?.length) return;
     setLoading(true);
     setError("");
-    setImportProgress(0);
-    setImportStatus("Preparing spreadsheets…");
-    const files = Array.from(fileList);
-    const invalid = files.find((file) => !["xlsx", "xls", "csv"].includes(file.name.split(".").pop()?.toLowerCase() ?? ""));
-    if (invalid) {
-      setError(`${invalid.name} is not an Excel or CSV file.`);
-      setLoading(false);
-      setImportStatus("");
-      return;
-    }
-
-    const imported: StudentRecord[] = [];
-    const worker = new Worker(new URL("../workers/import.worker.ts", import.meta.url), { type: "module" });
-    let settled = false;
-    const finish = (message?: string) => {
-      if (settled) return;
-      settled = true;
-      worker.terminate();
-      if (message) setError(message);
-      setLoading(false);
-      setImportStatus("");
-    };
-    worker.onmessage = (event: MessageEvent<{
-      type: "progress" | "batch" | "done" | "error";
-      fileName?: string; fileIndex?: number; fileCount?: number; rowsRead?: number; totalRows?: number;
-      records?: StudentRecord[]; totalImported?: number; message?: string;
-    }>) => {
-      const data = event.data;
-      if (data.type === "batch" && data.records) {
-        imported.push(...data.records);
-      } else if (data.type === "progress") {
-        const fileFraction = data.totalRows ? data.rowsRead! / data.totalRows : 1;
-        const overall = ((data.fileIndex! + fileFraction) / data.fileCount!) * 100;
-        setImportProgress(Math.min(99, Math.round(overall)));
-        setImportStatus(`Reading ${data.fileName} · ${data.rowsRead?.toLocaleString()} of ${data.totalRows?.toLocaleString()} rows`);
-      } else if (data.type === "done") {
-        if (!imported.length) {
-          finish("No data rows found. Check that the first worksheet has a header row and records.");
-          return;
-        }
-        setRecords((old) => [...old, ...imported]);
-        setTab("records");
-        setImportProgress(100);
-        finish();
-      } else if (data.type === "error") {
-        finish(data.message || "Could not read these files.");
-      }
-    };
-    worker.onerror = () => finish("Spreadsheet import failed in the background worker. Try saving the workbook as .xlsx or .csv and importing again.");
     try {
-      // File/Blob objects are structured-cloned efficiently; the worker reads
-      // one workbook at a time so multiple large uploads do not duplicate buffers.
-      worker.postMessage({ files });
-    } catch (error) {
-      finish(error instanceof Error ? error.message : "Could not load the selected files.");
+      const imported: StudentRecord[] = [];
+      for (const file of Array.from(fileList)) {
+        const ext = file.name.split(".").pop()?.toLowerCase();
+        if (!["xlsx", "xls", "csv"].includes(ext ?? "")) throw new Error(`${file.name} is not an Excel or CSV file.`);
+        const buffer = await file.arrayBuffer();
+        const workbook = XLSX.read(buffer, { type: "array", cellDates: true });
+        const sheetName = workbook.SheetNames[0];
+        const sheet = sheetName ? workbook.Sheets[sheetName] : undefined;
+        if (!sheet) continue;
+        const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "", raw: false });
+        rows.forEach((row, index) => {
+          const data: Record<string, string> = {};
+          for (const [header, value] of Object.entries(row)) data[header.trim() || "Unnamed column"] = normalizeValue(value);
+          imported.push({
+            id: `${file.name}:${index + 2}:${crypto.randomUUID()}`,
+            source: file.name,
+            rowNumber: index + 2,
+            data
+          });
+        });
+      }
+      if (!imported.length) throw new Error("No data rows found. Check that the first worksheet has a header row and records.");
+      setRecords((old) => [...old, ...imported]);
+      setTab("records");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not read these files.");
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -524,6 +521,146 @@ export default function Home() {
     setError("");
   }
 
+  function recordRuleHistory(action: string, rule: Pick<NormalizationRule, "field" | "from" | "to" | "scope">) {
+    setNormalizationHistory((old) => [{ id: crypto.randomUUID(), at: new Date().toISOString(), action, ...rule }, ...old]);
+  }
+
+  function addNormalizationRule(status: NormalizationRule["status"] = "approved") {
+    const from = normalizeValue(ruleFrom);
+    const to = normalizeValue(ruleTo);
+    if (!from || !to) { setError("Enter both the source value and the canonical value."); return; }
+    if (from.toLowerCase() === to.toLowerCase()) { setError("The source and canonical values are already identical."); return; }
+    const existing = editingRuleId ? normalizationRules.find((r) => r.id === editingRuleId) : undefined;
+    const rule: NormalizationRule = { id: existing?.id ?? crypto.randomUUID(), field: ruleField, from, to, status: existing?.status ?? status, scope: ruleScope };
+    setNormalizationRules((old) => [...old.filter((r) => r.id !== rule.id && !(r.field === rule.field && r.from.toLowerCase() === from.toLowerCase() && r.scope === rule.scope)), rule]);
+    recordRuleHistory(existing ? "Edited" : status === "approved" ? "Created and approved" : "Added suggestion", rule);
+    setRuleFrom(""); setRuleTo(""); setEditingRuleId(null); setError("");
+  }
+
+  function changeRuleStatus(rule: NormalizationRule, status: NormalizationRule["status"]) {
+    setNormalizationRules((old) => old.map((item) => item.id === rule.id ? { ...item, status } : item));
+    recordRuleHistory(status === "approved" ? "Approved" : status === "disabled" ? "Disabled" : "Returned to suggestions", rule);
+  }
+
+  function removeRule(rule: NormalizationRule) {
+    setNormalizationRules((old) => old.filter((item) => item.id !== rule.id));
+    recordRuleHistory("Removed", rule);
+  }
+
+  function exportNormalizationDictionary() {
+    const rows = normalizationRules.map(({ id, ...rule }) => rule);
+    exportRows(rows, "normalization-dictionary.xlsx");
+  }
+
+  async function importNormalizationDictionary(file: File | undefined) {
+    if (!file) return;
+    try {
+      const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      if (!sheet) throw new Error("The dictionary file has no worksheet.");
+      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" });
+      const imported = rows.map((row) => ({
+        id: crypto.randomUUID(), field: normalizeValue(row.field ?? row.Field),
+        from: normalizeValue(row.from ?? row.From ?? row["Original value"]),
+        to: normalizeValue(row.to ?? row.To ?? row["Canonical value"]),
+        status: (normalizeValue(row.status ?? row.Status).toLowerCase() === "disabled" ? "disabled" : normalizeValue(row.status ?? row.Status).toLowerCase() === "suggested" ? "suggested" : "approved") as NormalizationRule["status"],
+        scope: normalizeValue(row.scope ?? row.Scope) || "global"
+      })).filter((r) => r.field && r.from && r.to);
+      if (!imported.length) throw new Error("No valid rules found. Expected Field, From, To and optional Status/Scope columns.");
+      setNormalizationRules((old) => [...old, ...imported]);
+      imported.forEach((rule) => recordRuleHistory("Imported", rule));
+      setError("");
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not import dictionary."); }
+  }
+
+  function restoreHistoryRule(entry: typeof normalizationHistory[number]) {
+    const rule: NormalizationRule = { id: crypto.randomUUID(), field: entry.field, from: entry.from, to: entry.to, scope: entry.scope, status: "approved" };
+    setNormalizationRules((old) => [...old, rule]);
+    recordRuleHistory("Restored as approved", rule);
+  }
+
+  function exportPeopleDatabase() {
+    if (!records.length) { setError("Import records before exporting People Master."); return; }
+    const parent = new Map<string, string>();
+    const find = (id: string): string => { const p = parent.get(id); if (!p) { parent.set(id,id); return id; } if (p === id) return id; const root = find(p); parent.set(id,root); return root; };
+    const unite = (a:string,b:string) => { const x=find(a), y=find(b); if(x!==y) parent.set(y,x); };
+    for (const match of matches) if (["Confirmed same person", "Auto-confirmed same person"].includes(effectiveDecision(match) ?? "")) unite(match.left.id, match.right.id);
+    if (collapseRepeatedSubmissions) for (const members of comparisonGroups.membersByRepresentative.values()) for (const member of members.slice(1)) unite(members[0].id, member.id);
+    const groups = new Map<string, StudentRecord[]>();
+    for (const record of records) { const root=find(record.id); const group=groups.get(root); if(group) group.push(record); else groups.set(root,[record]); }
+    const people: Record<string, unknown>[] = [];
+    const academic: Record<string, unknown>[] = [];
+    const contacts: Record<string, unknown>[] = [];
+    const employment: Record<string, unknown>[] = [];
+    const sourceRows: Record<string, unknown>[] = [];
+    const identityLinks: Record<string, unknown>[] = [];
+    const conflicts: Record<string, unknown>[] = [];
+    const flattened: Record<string, unknown>[] = [];
+    for (const group of groups.values()) {
+      const ranked = [...group].sort((a,b) => Object.values(b.data).filter(Boolean).length - Object.values(a.data).filter(Boolean).length);
+      const stableSeed = `${ranked[0]?.source ?? "source"}:${ranked[0]?.rowNumber ?? 0}`;
+      let stableHash = 2166136261;
+      for (let i = 0; i < stableSeed.length; i++) stableHash = Math.imul(stableHash ^ stableSeed.charCodeAt(i), 16777619);
+      const personId = `P${(stableHash >>> 0).toString(16).toUpperCase().padStart(8,"0")}`;
+      const allFields = Array.from(new Set(group.flatMap(r => Object.keys(r.data))));
+      const profile: Record<string, unknown> = { "Person ID": personId, "Full Name": ranked[0]?.data.Name ?? ranked[0]?.data["Full Name"] ?? "", "Gender": ranked[0]?.data.Gender ?? "", "Source Record Count": group.length, "Source Files": Array.from(new Set(group.map(r=>r.source))).join("; "), "Identity Status": group.length > 1 ? "Reviewer-linked records" : "Single source record" };
+      for (const field of allFields) {
+        const values = Array.from(new Set(group.map(r=>normalizeValue(r.data[field] ?? "")).filter(Boolean)));
+        if (!(field in profile)) profile[field] = values[0] ?? "";
+        // Academic qualifications are a one-to-many history, not identity conflicts.
+        if (!/^(degree|qualification|year|graduation year|department)(?:\s*\(?\d+\)?)?$/i.test(field) && values.length > 1) conflicts.push({ "Person ID":personId, Field:field, "Source Values":values.join(" | "), "Resolution":"Unresolved — review required" });
+      }
+      people.push(profile);
+      const qualificationSeen = new Set<string>();
+      for (const r of group) {
+        const suffixes = new Set(["", ...Object.keys(r.data).map(k => k.match(/(?:\s|\()([0-9]+)\)?$/)?.[1] ?? "").filter(Boolean)]);
+        const getAcademic = (base: string, suffix: string) => {
+          const candidates = Object.entries(r.data).filter(([key]) => {
+            const cleaned = key.toLowerCase().replace(/[()]/g, "").replace(/\s+/g, " ").trim();
+            return suffix ? cleaned === `${base.toLowerCase()} ${suffix}` : cleaned === base.toLowerCase();
+          });
+          return normalizeValue(candidates[0]?.[1] ?? "");
+        };
+        for (const suffix of suffixes) {
+          const degree = getAcademic("Degree", suffix) || getAcademic("Qualification", suffix);
+          const year = getAcademic("Year", suffix) || getAcademic("Graduation Year", suffix);
+          const department = getAcademic("Department", suffix);
+          if (degree || year || department) {
+            const key = [degree,year,department].join("::").toLowerCase();
+            if (!qualificationSeen.has(key)) { qualificationSeen.add(key); academic.push({ "Person ID":personId, Degree:degree, "Graduation Year":year, Department:department, "Source File":r.source, "Source Row":r.rowNumber }); }
+          }
+        }
+        const contactFields = Object.keys(r.data).filter(k => /^(?:email|e-mail|mail|mobile|phone|contact|address)(?:\s+.*|\s*\(\d+\))?$/i.test(k));
+        for (const field of contactFields) {
+          const value = normalizeValue(r.data[field] ?? "");
+          const type = /email|e-mail/i.test(field) ? "Email" : /address/i.test(field) ? "Address" : "Phone";
+          if (value && !contacts.some(c=>c["Person ID"]===personId && c["Contact Type"]===type && c.Value===value)) contacts.push({ "Person ID":personId, "Contact Type":type, Value:value, "Source File":r.source, "Source Row":r.rowNumber });
+        }
+        const workplace = normalizeValue(r.data["Current Workplace"] ?? r.data.Company ?? r.data.Employer ?? "");
+        if (workplace) employment.push({ "Person ID":personId, "Current Workplace":workplace, "Source File":r.source, "Source Row":r.rowNumber });
+        sourceRows.push({ "Person ID":personId, "Source Record ID":r.id, "Source File":r.source, "Source Row":r.rowNumber, ...r.data });
+        identityLinks.push({ "Person ID":personId, "Source Record ID":r.id, "Source File":r.source, "Source Row":r.rowNumber, "Link Basis":group.length > 1 ? "Confirmed identity group" : "Single record", "Reviewer Decision":group.length > 1 ? "Confirmed same person" : "Not linked" });
+      }
+      const row: Record<string, unknown> = { "Person ID":personId, ...profile };
+      const qualifications = academic.filter(a=>a["Person ID"]===personId);
+      qualifications.forEach((q,i)=>{ const n=i+1; row[`Degree ${n}`]=q.Degree; row[`Year ${n}`]=q["Graduation Year"]; row[`Department ${n}`]=q.Department; });
+      const personContacts = contacts.filter(c=>c["Person ID"]===personId);
+      let phone=0,email=0,address=0;
+      personContacts.forEach(c=>{ if(c["Contact Type"]==="Phone") row[`Phone ${++phone}`]=c.Value; else if(c["Contact Type"]==="Address") row[`Address ${++address}`]=c.Value; else row[`Email ${++email}`]=c.Value; });
+      row["Current Workplace"] = employment.find(e=>e["Person ID"]===personId)?.["Current Workplace"] ?? "";
+      flattened.push(row);
+    }
+    const unresolved = matches.filter(m => !effectiveDecision(m)).map(m=>({ "Candidate ID":m.id, "Similarity Score":m.score, "Status":m.status, "Record A":m.left.id, "File A":m.left.source, "Row A":m.left.rowNumber, "Record B":m.right.id, "File B":m.right.source, "Row B":m.right.rowNumber, "Review Status":"Pending" }));
+    const wb = XLSX.utils.book_new();
+    const add = (rows: Record<string,unknown>[], name:string) => XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows.length ? rows : [{ Note:"No rows" }]), name);
+    add(people,"People_Master"); add(academic,"Academic_History"); add(contacts,"Contact_Details"); add(employment,"Employment"); add(sourceRows,"Source_Records"); add(identityLinks,"Identity_Links"); add(normalizationRules.map(({id,...r})=>r),"Normalization_Aliases"); add(unresolved,"Unresolved_Matches"); add(conflicts,"Conflicts");
+    XLSX.writeFile(wb,"people-master-audit-workbook.xlsx");
+    const db = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(db, XLSX.utils.json_to_sheet(flattened), "People_Master");
+    XLSX.writeFile(db,"people-master-database-ready.xlsx");
+    setError("");
+  }
+
   function resetWorkspace() {
     setRecords([]); setQuery(""); setSourceFilter("All files"); setMissingOnly(false);
     setDecisions({}); setSelectedMatchIds([]); setSelectedMatch(null); setMapping({}); setError(""); setTab("records"); setCollapseRepeatedSubmissions(false); setAutoConfirmEnabled(false);
@@ -535,20 +672,8 @@ export default function Home() {
     { id: "matches", label: "Match review", count: pendingMatches.length },
     { id: "missing", label: "Missing information", count: missingRecords.length },
     { id: "unmatched", label: "Unmatched", count: unmatchedRecords.length },
-    { id: "visualization", label: "3D Visualization", count: matches.filter((m) => m.left.source !== m.right.source).length }
+    { id: "normalization", label: "Normalization Centre", count: normalizationRules.filter((r) => r.status === "approved").length }
   ];
-
-  if (tab === "visualization") {
-    const pairMatches = matches.filter((m) => m.left.source === masterSource && m.right.source === selectedD2Source || m.left.source === selectedD2Source && m.right.source === masterSource);
-    const pairApproved = pairMatches.filter((m) => { const d = effectiveDecision(m); return d === "Confirmed same person" || d === "Auto-confirmed same person"; }).length;
-    const pairRejected = pairMatches.filter((m) => effectiveDecision(m) === "Not a match").length;
-    const pairPending = pairMatches.length - pairApproved - pairRejected;
-    const d1Count = mappedRecords.filter((r) => r.source === masterSource).length;
-    const d2Count = mappedRecords.filter((r) => r.source === selectedD2Source).length;
-    const linkedD1 = new Set(pairMatches.filter((m) => { const d = effectiveDecision(m); return d === "Confirmed same person" || d === "Auto-confirmed same person"; }).map((m) => m.left.source === masterSource ? m.left.id : m.right.id)).size;
-    const linkedD2 = new Set(pairMatches.filter((m) => { const d = effectiveDecision(m); return d === "Confirmed same person" || d === "Auto-confirmed same person"; }).map((m) => m.left.source === selectedD2Source ? m.left.id : m.right.id)).size;
-    return <VisualizationWorkspace masterSource={masterSource} d2Source={selectedD2Source} sources={sources} onD1Change={setMasterSource} onD2Change={setSelectedD2Source} onBack={() => setTab("matches")} d1Count={d1Count} d2Count={d2Count} candidateCount={pairMatches.length} confirmedCount={pairApproved} pendingCount={pairPending} rejectedCount={pairRejected} unmatchedD1={Math.max(0, d1Count - linkedD1)} unmatchedD2={Math.max(0, d2Count - linkedD2)} relationships={pairMatches.map((match) => { const d1IsLeft = match.left.source === masterSource; return { ...match, left: d1IsLeft ? match.left : match.right, right: d1IsLeft ? match.right : match.left, status: effectiveDecision(match) ?? match.status }; })} />;
-  }
 
   return (
     <main className="min-h-screen px-4 py-7 sm:px-6 lg:px-8">
@@ -578,11 +703,7 @@ export default function Home() {
                 onChange={(e) => { void importFiles(e.target.files); e.currentTarget.value = ""; }} />
             </label>
           </div>
-          <p className="mt-3 text-xs text-slate-400">Files are parsed in a background worker in 1,000-row batches. Matching also runs off the main thread, so large imports do not freeze the page.</p>
-          {loading && <div className="mt-3 rounded-xl border border-indigo-100 bg-indigo-50/70 p-3" role="status" aria-live="polite">
-            <div className="mb-2 flex items-center justify-between gap-3 text-xs font-semibold text-indigo-900"><span>{importStatus || "Importing records…"}</span><span>{importProgress}%</span></div>
-            <div className="h-2 overflow-hidden rounded-full bg-indigo-100"><div className="h-full rounded-full bg-indigo-600 transition-[width] duration-300" style={{ width: `${importProgress}%` }} /></div>
-          </div>}
+          <p className="mt-3 text-xs text-slate-400">Files are processed in your browser. Matching runs in a background worker; large datasets may still require substantial browser memory.</p>
           <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-xl border border-indigo-100 bg-indigo-50/60 p-3">
             <input type="checkbox" checked={collapseRepeatedSubmissions} onChange={(e) => setCollapseRepeatedSubmissions(e.target.checked)} className="mt-1 accent-indigo-600" />
             <span>
@@ -638,6 +759,7 @@ export default function Home() {
               <button className={buttonSecondary} onClick={() => exportRecords(filteredRecords, "filtered-records.xlsx")}>Export filtered records (Excel)</button>
               <button className={buttonSecondary} onClick={() => exportRows(filteredRecords.map((r) => { const members = comparisonGroups.membersByRepresentative.get(r.id) ?? [r]; return { "Source File": r.source, "Representative Source Row": r.rowNumber, "Repeated Submissions Grouped": members.length > 1 ? "Yes" : "No", "Submission Count": members.length, "Source Rows In Group": members.map((member) => `${member.source}: ${member.rowNumber}`).join("; "), ...r.data }; }), "filtered-records.csv")}>Export filtered records (CSV)</button>
               <button className={buttonSecondary} onClick={exportMatches}>Export matches</button>
+              <button className={buttonSecondary} onClick={exportPeopleDatabase}>Export People Master + audit workbook</button>
               <button className={buttonSecondary} onClick={() => exportRecords(unmatchedRecords, "unmatched-records.xlsx")}>Export unmatched</button>
             </div>
             {records.length > 0 && sources.length > 1 && <>
@@ -779,6 +901,22 @@ export default function Home() {
                 <span>{approvedMatches.length.toLocaleString()} already approved/auto-confirmed</span>
               </div>
             </div>
+            <section className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-950 p-4 text-white shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2"><div><h2 className="font-bold">D1 ↔ D2 relationship map</h2><p className="mt-1 text-xs text-slate-300">A spatial overview of how records connect across the selected datasets.</p></div><div className="flex gap-3 text-xs"><span className="text-sky-300">● D1</span><span className="text-fuchsia-300">● D2</span><span className="text-emerald-300">━ Confirmed</span><span className="text-amber-300">┄ Pending</span></div></div>
+              <div className="mt-3 overflow-x-auto rounded-xl bg-slate-900/80 p-2" style={{ perspective: "900px" }}>
+                <div className="relative mx-auto h-[230px] min-w-[520px] max-w-4xl" style={{ transform: "rotateX(10deg) rotateY(-7deg)", transformStyle: "preserve-3d" }}>
+                  <div className="absolute inset-x-8 bottom-5 h-28 rounded-[50%] border border-slate-700/70" style={{ transform: "rotateX(68deg) translateZ(-25px)", background: "radial-gradient(ellipse, rgba(99,102,241,.16), rgba(15,23,42,0) 70%)" }} />
+                  <div className="absolute left-4 top-3 text-xs font-bold text-sky-300">D1 · {masterSource || "Master"}</div><div className="absolute right-4 top-3 text-xs font-bold text-fuchsia-300">D2 · {selectedD2Source || "Incoming"}</div>
+                  <svg viewBox="0 0 800 210" className="absolute inset-0 h-full w-full" aria-label="Relationship connections between D1 and D2">
+                    {matches.slice(0, 80).filter((m) => m.left.source !== m.right.source).map((m, index) => { const confirmed = effectiveDecision(m) === "Confirmed same person" || effectiveDecision(m) === "Auto-confirmed same person"; const rejected = effectiveDecision(m) === "Not a match"; const y1 = 35 + ((index * 47) % 145); const y2 = 35 + ((index * 71 + Math.round(m.score)) % 145); return <line key={m.id} x1="115" y1={y1} x2="685" y2={y2} stroke={rejected ? "#64748b" : confirmed ? "#34d399" : "#fbbf24"} strokeWidth={confirmed ? 2.4 : 1.3} strokeDasharray={rejected ? "2 6" : confirmed ? "none" : "6 5"} opacity={rejected ? .2 : .68} />; })}
+                    {Array.from({ length: Math.min(12, Math.max(3, Math.ceil(mappedRecords.filter((r) => r.source === masterSource).length / 100))) }, (_, i) => <circle key={`a${i}`} cx="115" cy={28 + i * 14} r="4.5" fill="#38bdf8" stroke="#e0f2fe" strokeWidth="1" />)}
+                    {Array.from({ length: Math.min(12, Math.max(3, Math.ceil(mappedRecords.filter((r) => r.source === selectedD2Source).length / 100))) }, (_, i) => <circle key={`b${i}`} cx="685" cy={28 + i * 14} r="4.5" fill="#e879f9" stroke="#fae8ff" strokeWidth="1" />)}
+                  </svg>
+                  <div className="absolute bottom-1 left-1/2 -translate-x-1/2 rounded-full border border-slate-700 bg-slate-900/90 px-3 py-1 text-[10px] text-slate-300">Connections represent candidate pairs · visual sample capped at 80 links</div>
+                </div>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4"><div className="rounded-lg bg-slate-900 p-3"><div className="text-xs text-slate-400">D1 records</div><div className="mt-1 text-xl font-bold text-sky-300">{mappedRecords.filter((r) => r.source === masterSource).length.toLocaleString()}</div></div><div className="rounded-lg bg-slate-900 p-3"><div className="text-xs text-slate-400">D2 records</div><div className="mt-1 text-xl font-bold text-fuchsia-300">{mappedRecords.filter((r) => r.source === selectedD2Source).length.toLocaleString()}</div></div><div className="rounded-lg bg-slate-900 p-3"><div className="text-xs text-slate-400">Candidate links</div><div className="mt-1 text-xl font-bold">{matches.filter((m) => m.left.source !== m.right.source).length.toLocaleString()}</div></div><div className="rounded-lg bg-slate-900 p-3"><div className="text-xs text-slate-400">Confirmed links</div><div className="mt-1 text-xl font-bold text-emerald-300">{approvedMatches.filter((m) => m.left.source !== m.right.source).length.toLocaleString()}</div></div></div>
+            </section>
             {matching && <div className="rounded-xl border border-indigo-100 bg-indigo-50 p-4 text-sm text-indigo-800">Checking {comparisonRecords.length.toLocaleString()} comparison records for within-file duplicates and cross-file matches in the background. You can keep using the interface; results appear when the pass completes.</div>}
             {!matching && pendingMatches.length > 200 && <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">Showing the first 200 of {pendingMatches.length.toLocaleString()} pending candidates to keep the page responsive. Export matches to review the full candidate report, or narrow the list with search and filters.</div>}
             {pendingMatches.length === 0 ? <Empty title="No pending candidates" detail={sources.length < 1 ? "Import an Excel or CSV file to find possible duplicates." : "No candidates found. Check the column mapping or lower the threshold. Matching checks both duplicates within a file and common records across files."} /> :
@@ -810,6 +948,26 @@ export default function Home() {
         )}
         {tab === "missing" && <RecordTable records={missingRecords} columns={columns} pageSize={100} />}
         {tab === "unmatched" && <RecordTable records={unmatchedRecords} columns={columns} pageSize={100} />}
+
+        {tab === "normalization" && <section className="space-y-5">
+          <div className="rounded-2xl border border-indigo-100 bg-white p-5 shadow-sm">
+            <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-bold">Normalization Centre</h2><p className="mt-1 max-w-3xl text-sm leading-6 text-slate-500">Manage semantic aliases used by the matching engine. Original imported values are never overwritten. Only approved rules affect future candidate generation; rule changes do not automatically change prior reviewer decisions.</p></div><div className="flex gap-2"><label className={`${buttonSecondary} inline-flex items-center`}>Import dictionary<input type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={e=>{void importNormalizationDictionary(e.target.files?.[0]);e.currentTarget.value="";}} /></label><button className={buttonSecondary} onClick={exportNormalizationDictionary}>Export dictionary</button></div></div>
+            <div className="mt-4 flex flex-wrap gap-2">{(["rules","suggestions","history"] as const).map(t=><button key={t} className={`${buttonBase} ${ruleTab===t?"bg-slate-900 text-white":buttonSecondary}`} onClick={()=>setRuleTab(t)}>{t[0].toUpperCase()+t.slice(1)}</button>)}</div>
+            {ruleTab === "rules" && <>
+              <div className="mt-5 grid gap-3 rounded-xl bg-slate-50 p-4 md:grid-cols-5">
+                <label className="text-xs font-semibold text-slate-600">Field<select value={ruleField} onChange={e=>setRuleField(e.target.value)} className="mt-1 w-full rounded-lg border bg-white p-2 text-sm">{[...new Set([...standardFields,...columns])].map(f=><option key={f}>{f}</option>)}</select></label>
+                <label className="text-xs font-semibold text-slate-600">Source value<input value={ruleFrom} onChange={e=>setRuleFrom(e.target.value)} placeholder="e.g. M.S. Engg." className="mt-1 w-full rounded-lg border bg-white p-2 text-sm" /></label>
+                <label className="text-xs font-semibold text-slate-600">Canonical value<input value={ruleTo} onChange={e=>setRuleTo(e.target.value)} placeholder="e.g. M.S. Engineering" className="mt-1 w-full rounded-lg border bg-white p-2 text-sm" /></label>
+                <label className="text-xs font-semibold text-slate-600">Scope<select value={ruleScope} onChange={e=>setRuleScope(e.target.value)} className="mt-1 w-full rounded-lg border bg-white p-2 text-sm"><option value="global">All datasets</option>{sources.map(s=><option key={s} value={s}>{s}</option>)}</select></label>
+                <div className="flex items-end"><button className={`${buttonPrimary} w-full`} onClick={()=>addNormalizationRule("approved")}>{editingRuleId ? "Save rule changes" : "Add approved rule"}</button></div>
+              </div>
+              <div className="mt-4 overflow-auto rounded-xl border"><table className="w-full text-left text-sm"><thead className="bg-slate-100 text-xs uppercase text-slate-500"><tr><th className="p-3">Field</th><th className="p-3">Original value</th><th className="p-3">Canonical value</th><th className="p-3">Scope</th><th className="p-3">Status</th><th className="p-3">Actions</th></tr></thead><tbody>{normalizationRules.map(r=><tr key={r.id} className="border-t"><td className="p-3">{r.field}</td><td className="p-3">{r.from}</td><td className="p-3">{r.to}</td><td className="p-3">{r.scope==="global"?"All datasets":r.scope}</td><td className="p-3"><span className="rounded-full bg-slate-100 px-2 py-1 text-xs">{r.status}</span></td><td className="p-3"><div className="flex flex-wrap gap-1">{r.status!=="approved"&&<button className="text-xs font-semibold text-emerald-700" onClick={()=>changeRuleStatus(r,"approved")}>Approve</button>}{r.status!=="disabled"&&<button className="text-xs font-semibold text-amber-700" onClick={()=>changeRuleStatus(r,"disabled")}>Disable</button>}<button className="text-xs font-semibold text-indigo-700" onClick={()=>{setEditingRuleId(r.id);setRuleField(r.field);setRuleFrom(r.from);setRuleTo(r.to);setRuleScope(r.scope);setRuleTab("rules");}}>Edit</button><button className="text-xs font-semibold text-rose-700" onClick={()=>removeRule(r)}>Remove</button></div></td></tr>)}</tbody></table>{!normalizationRules.length&&<p className="p-6 text-center text-sm text-slate-500">No custom rules yet. Add a rule above or review suggested aliases.</p>}</div>
+            </>}
+            {ruleTab === "suggestions" && <div className="mt-4"><p className="text-sm text-slate-500">Observed distinct values are collected from imported records. Choose one and define its canonical value; nothing is applied until you approve a rule.</p><div className="mt-3 space-y-2">{Array.from(new Set(records.flatMap(r=>Object.entries(r.data).map(([field,value])=>({field:canonicalHeader(field),value:normalizeValue(value)})).filter(x=>x.value)))).filter((item,i,arr)=>arr.findIndex(x=>x.field===item.field&&x.value.toLowerCase()===item.value.toLowerCase())===i).slice(0,150).map((item,i)=><div key={`${item.field}-${item.value}-${i}`} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3"><div><span className="text-xs font-semibold text-slate-500">{item.field}</span><p className="text-sm">{item.value}</p></div><button className="text-xs font-semibold text-indigo-700" onClick={()=>{setRuleField(item.field);setRuleFrom(item.value);setRuleTab("rules");}}>Create mapping</button></div>)}{!records.length&&<p className="py-8 text-center text-sm text-slate-500">Import datasets to generate value suggestions.</p>}</div></div>}
+            {ruleTab === "history" && <div className="mt-4 space-y-2">{normalizationHistory.map(h=><div key={h.id} className="rounded-lg border p-3 text-sm"><div className="flex flex-wrap justify-between gap-2"><strong>{h.action} · {h.field}</strong><span className="text-xs text-slate-400">{new Date(h.at).toLocaleString()}</span></div><p className="mt-1 text-slate-600">{h.from} → {h.to} · {h.scope}</p><button className="mt-2 text-xs font-semibold text-indigo-700" onClick={()=>restoreHistoryRule(h)}>Restore as approved rule</button></div>)}{!normalizationHistory.length&&<p className="py-8 text-center text-sm text-slate-500">No changes recorded yet.</p>}</div>}
+            <div className="mt-5 rounded-xl border border-slate-200 p-4"><h3 className="font-semibold">Test a normalization rule</h3><div className="mt-2 flex flex-wrap gap-2"><input value={ruleTestValue} onChange={e=>setRuleTestValue(e.target.value)} placeholder="Enter a value to test" className="min-w-0 flex-1 rounded-lg border p-2 text-sm"/><span className="self-center text-sm text-slate-500">→</span><strong className="self-center text-sm">{(()=>{const value=normalizeValue(ruleTestValue);const rule=normalizationRules.find(r=>r.status==="approved"&&r.field===ruleField&&r.from.toLowerCase()===value.toLowerCase()&&(r.scope==="global"||r.scope===masterSource));return rule?.to??value;})()}</strong></div><p className="mt-2 text-xs text-slate-400">Preview only. The test does not modify imported source values.</p></div>
+          </div>
+        </section>}
 
         {activeMatch && <CompareModal
           match={activeMatch}
@@ -846,36 +1004,6 @@ function Stat({ label, value, note }: { label: string; value: number; note: stri
 
 function Empty({ title, detail }: { title: string; detail: string }) {
   return <div className="rounded-2xl border bg-white px-5 py-14 text-center"><h2 className="font-bold">{title}</h2><p className="mx-auto mt-2 max-w-lg text-sm text-slate-500">{detail}</p></div>;
-}
-
-
-function VisualizationWorkspace({ masterSource, d2Source, sources, onD1Change, onD2Change, onBack, d1Count, d2Count, candidateCount, confirmedCount, pendingCount, rejectedCount, unmatchedD1, unmatchedD2, relationships }: {
-  masterSource: string; d2Source: string; sources: string[]; onD1Change: (value: string) => void; onD2Change: (value: string) => void; onBack: () => void;
-  d1Count: number; d2Count: number; candidateCount: number; confirmedCount: number; pendingCount: number; rejectedCount: number; unmatchedD1: number; unmatchedD2: number;
-  relationships: Array<Omit<ReturnType<typeof compareRecords>[number], "status"> & { status: string }>;
-}) {
-  const [mode, setMode] = useState<"all" | "confirmed" | "pending" | "rejected">("all");
-  const [inspected, setInspected] = useState<(typeof relationships)[number] | null>(null);
-  const visible = relationships.filter((r) => mode === "all" || (mode === "confirmed" ? r.status === "Confirmed same person" || r.status === "Auto-confirmed same person" : mode === "rejected" ? r.status === "Not a match" : r.status !== "Confirmed same person" && r.status !== "Auto-confirmed same person" && r.status !== "Not a match"));
-  const statusColor = (status: string) => status === "Confirmed same person" || status === "Auto-confirmed same person" ? "#baffd5" : status === "Not a match" ? "#ff7185" : "#8dd6ae";
-  const shortName = (r: (typeof relationships)[number], side: "left" | "right") => String(r[side].data.Name ?? r[side].data["Full Name"] ?? r[side].data.name ?? "Unnamed record");
-  return <main className="fixed inset-0 z-50 flex h-[100dvh] min-h-0 flex-col overflow-hidden bg-[#07110d] text-white">
-    <header className="z-20 flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-emerald-100/10 bg-[#07110d]/90 px-4 py-3 backdrop-blur-xl sm:px-7">
-      <div className="flex items-center gap-3"><button onClick={onBack} className="rounded-lg border border-emerald-100/15 bg-white/[.035] px-3 py-2 text-xs font-semibold text-white/80 transition hover:bg-white/10">← Workspace</button><div><div className="text-[9px] font-semibold uppercase tracking-[.25em] text-emerald-300/80">Three-dimensional data observatory</div><h1 className="text-lg font-light tracking-[.12em]">D1 <span className="text-emerald-300">↔</span> D2 RELATIONSHIP FIELD</h1></div></div>
-      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-emerald-100/10 bg-black/30 p-2"><label className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-white/45">D1<select value={masterSource} onChange={e=>{onD1Change(e.target.value);setInspected(null)}} className="max-w-40 rounded-md border border-white/10 bg-[#101b15] px-2 py-1.5 text-xs normal-case tracking-normal text-white">{sources.map(s=><option key={s} value={s}>{s}</option>)}</select></label><label className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-white/45">D2<select value={d2Source} onChange={e=>{onD2Change(e.target.value);setInspected(null)}} className="max-w-40 rounded-md border border-white/10 bg-[#101b15] px-2 py-1.5 text-xs normal-case tracking-normal text-white">{sources.filter(s=>s!==masterSource).map(s=><option key={s} value={s}>{s}</option>)}</select></label></div>
-    </header>
-    <section className="relative min-h-0 flex-1 overflow-hidden bg-[radial-gradient(ellipse_at_50%_48%,#14251b_0%,#0a1510_48%,#050b08_100%)]">
-      <div className="pointer-events-none absolute inset-0 z-[1] opacity-[.09]" style={{backgroundImage:"linear-gradient(rgba(184,232,201,.18) 1px,transparent 1px),linear-gradient(90deg,rgba(184,232,201,.18) 1px,transparent 1px)",backgroundSize:"64px 64px"}} />
-      <RelationshipScene relationships={relationships} mode={mode} onInspect={setInspected} />
-      <div className="pointer-events-none absolute left-5 top-5 z-10 rounded-xl border border-emerald-100/10 bg-black/35 px-4 py-3 backdrop-blur-md"><div className="text-[9px] uppercase tracking-[.22em] text-emerald-100/45">Relationship field</div><div className="mt-1 text-sm font-medium">{visible.length.toLocaleString()} connections</div><div className="mt-1 text-[10px] text-white/35">Rendering up to 3,500 actual links</div></div>
-      <div className="absolute right-5 top-5 z-10 flex flex-wrap justify-end gap-2">{([['all','All'],['confirmed','Confirmed'],['pending','Pending'],['rejected','Rejected']] as const).map(([v,l])=><button key={v} onClick={()=>{setMode(v);setInspected(null)}} className={`rounded-lg border px-3 py-2 text-[10px] font-semibold transition ${mode===v?'border-emerald-100/70 bg-emerald-100 text-[#07110d]':'border-emerald-100/15 bg-black/40 text-white/65 hover:bg-white/10'}`}>{l}</button>)}</div>
-      <div className="pointer-events-none absolute bottom-5 left-5 z-10 hidden items-center gap-4 rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-[9px] uppercase tracking-wider text-white/55 backdrop-blur sm:flex"><span><i className="mr-1 inline-block h-2 w-2 rounded-full bg-emerald-200"/>Confirmed</span><span><i className="mr-1 inline-block h-2 w-2 rounded-full bg-emerald-500"/>Pending</span><span><i className="mr-1 inline-block h-2 w-2 rounded-full bg-rose-400"/>Rejected</span></div>
-      {inspected&&<div className="absolute bottom-5 right-5 z-20 w-[min(92vw,440px)] rounded-xl border border-emerald-100/15 bg-[#0b1711]/95 p-4 shadow-2xl backdrop-blur-xl"><div className="flex items-center justify-between gap-3"><span className="text-[9px] uppercase tracking-[.2em] text-white/45">Relationship inspector</span><button onClick={()=>setInspected(null)} className="rounded-md border border-white/10 px-2 py-1 text-[10px] text-white/55 hover:bg-white/10">Close</button></div><div className="mt-2 flex items-center justify-between"><span className="text-xs font-semibold" style={{color:statusColor(inspected.status)}}>{inspected.status}</span><span className="text-xs text-white/55">{inspected.score}% similarity</span></div><div className="mt-3 grid grid-cols-2 gap-3"><div className="rounded-lg border border-white/10 bg-white/[.03] p-3"><div className="text-[9px] uppercase tracking-wider text-emerald-200/50">D1 · {masterSource}</div><div className="mt-2 text-xs font-medium">{shortName(inspected,'left')}</div><div className="mt-1 text-[10px] text-white/40">Row {inspected.left.rowNumber}</div></div><div className="rounded-lg border border-white/10 bg-white/[.03] p-3"><div className="text-[9px] uppercase tracking-wider text-emerald-200/50">D2 · {d2Source}</div><div className="mt-2 text-xs font-medium">{shortName(inspected,'right')}</div><div className="mt-1 text-[10px] text-white/40">Row {inspected.right.rowNumber}</div></div></div><div className="mt-3 text-[10px] text-white/35">This connection represents an actual comparison result. Review or change its decision in Match Review.</div></div>}
-      {visible.length===0&&<div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center"><div className="rounded-2xl border border-emerald-100/10 bg-black/40 px-8 py-6 text-center"><div className="text-sm font-semibold">No relationships in this view</div><p className="mt-2 text-xs text-white/45">Try another filter or select a different D1 and D2 pair.</p></div></div>}
-    </section>
-    <section className="z-20 grid shrink-0 grid-cols-2 gap-px border-t border-emerald-100/10 bg-emerald-100/10 sm:grid-cols-3 lg:grid-cols-6">{[['D1 RECORDS',d1Count,'#b8e8c9'],['D2 RECORDS',d2Count,'#b8e8c9'],['CANDIDATE LINKS',candidateCount,'#e5f4e9'],['CONFIRMED',confirmedCount,'#baffd5'],['PENDING REVIEW',pendingCount,'#8dd6ae'],['MATCH RATE',`${candidateCount?Math.round(confirmedCount/candidateCount*100):0}%`,'#baffd5']].map(([label,value,color])=><div key={String(label)} className="min-h-[70px] bg-[#09140e] px-4 py-3 sm:px-5"><div className="text-[9px] font-medium tracking-[.16em] text-white/40">{label}</div><div className="mt-1 text-xl font-semibold tabular-nums" style={{color:String(color)}}>{Number.isFinite(Number(value))?Number(value).toLocaleString():value}</div></div>)}</section>
-    <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-emerald-100/10 bg-[#07110d] px-4 py-2 text-[9px] text-white/35 sm:px-6"><span>THREE.JS DATA OBSERVATORY / D1 ↔ D2</span><span>{unmatchedD1.toLocaleString()} unmatched D1 · {unmatchedD2.toLocaleString()} unmatched D2 · {rejectedCount.toLocaleString()} rejected</span></footer>
-  </main>;
 }
 
 function RecordTable({ records, columns, pageSize = 100 }: { records: StudentRecord[]; columns: string[]; pageSize?: number }) {

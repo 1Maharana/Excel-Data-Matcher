@@ -267,7 +267,9 @@ function addToIndex(index: Map<string, number[]>, key: string, recordIndex: numb
   else index.set(key, [recordIndex]);
 }
 
-export function compareRecords(records: StudentRecord[], threshold = 60, selectedFieldNames?: string[]): MatchCandidate[] {
+export type NormalizationRule = { id: string; field: string; from: string; to: string; status: "suggested" | "approved" | "disabled"; scope: "global" | string };
+
+export function compareRecords(records: StudentRecord[], threshold = 60, selectedFieldNames?: string[], normalizationRules: NormalizationRule[] = []): MatchCandidate[] {
   if (records.length < 2) return [];
   const activeFields = selectedFieldNames === undefined
     ? MATCH_FIELDS
@@ -278,7 +280,11 @@ export function compareRecords(records: StudentRecord[], threshold = 60, selecte
   const normalized = records.map((record) => {
     const values: Record<string, string> = {};
     for (const field of activeFields) {
-      values[field.name] = comparisonValue(field.name, valueFor(record, field.name));
+      const original = valueFor(record, field.name);
+      const custom = normalizationRules.find((rule) => rule.status === "approved" && rule.field === field.name &&
+        rule.scope !== "disabled" && normalizeValue(rule.from).toLowerCase() === original.toLowerCase() &&
+        (rule.scope === "global" || rule.scope === record.source));
+      values[field.name] = comparisonValue(field.name, custom ? custom.to : original);
     }
     return values;
   });
@@ -307,9 +313,7 @@ export function compareRecords(records: StudentRecord[], threshold = 60, selecte
   // Generate both cross-file matches and within-file duplicate candidates.
   // Buckets with too many records are skipped to avoid quadratic explosions.
   // Identifier buckets are inserted first, so the strongest evidence is prioritized.
-  // Numeric pair keys use far less memory than allocating hundreds of thousands
-  // of "i:j" strings on large alumni workbooks.
-  const pairs = new Set<number>();
+  const pairs = new Set<string>();
   const MAX_PAIRS_PER_BUCKET = 20_000;
   const MAX_TOTAL_CANDIDATE_PAIRS = 250_000;
 
@@ -323,7 +327,7 @@ export function compareRecords(records: StudentRecord[], threshold = 60, selecte
         if (pairs.size >= MAX_TOTAL_CANDIDATE_PAIRS) break;
         const i = Math.min(bucket[a], bucket[b]);
         const j = Math.max(bucket[a], bucket[b]);
-        if (i !== j) pairs.add(i * records.length + j);
+        if (i !== j) pairs.add(`${i}:${j}`);
       }
       if (pairs.size >= MAX_TOTAL_CANDIDATE_PAIRS) break;
     }
@@ -332,8 +336,9 @@ export function compareRecords(records: StudentRecord[], threshold = 60, selecte
 
   const results: MatchCandidate[] = [];
   for (const pair of pairs) {
-    const i = Math.floor(pair / records.length);
-    const j = pair - i * records.length;
+    const separator = pair.indexOf(":");
+    const i = Number(pair.slice(0, separator));
+    const j = Number(pair.slice(separator + 1));
     const left = records[i];
     const right = records[j];
     let points = 0;

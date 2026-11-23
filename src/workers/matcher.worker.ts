@@ -1,9 +1,9 @@
-import { compareRecords, type StudentRecord } from "@/lib/matcher";
+import { compareRecords, type StudentRecord, type NormalizationRule } from "@/lib/matcher";
 
-self.onmessage = (event: MessageEvent<{ records: StudentRecord[]; threshold: number; selectedFields?: string[] }>) => {
+self.onmessage = (event: MessageEvent<{ records: StudentRecord[]; threshold: number; selectedFields?: string[]; normalizationRules?: NormalizationRule[] }>) => {
   try {
-    const { records, threshold, selectedFields } = event.data;
-    const matches = compareRecords(records, threshold, selectedFields);
+    const { records, threshold, selectedFields, normalizationRules } = event.data;
+    const matches = compareRecords(records, threshold, selectedFields, normalizationRules);
     self.postMessage({ matches });
   } catch (error) {
     self.postMessage({ error: error instanceof Error ? error.message : "Unknown matching error" });

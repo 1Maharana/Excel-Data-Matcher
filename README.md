@@ -100,3 +100,15 @@ When two or more source files are loaded, the Export Master Configuration panel 
 In Match Review, use **Select all pending candidates (all pages)** to select every candidate matching the current search and source filters, including candidates beyond the 200 cards rendered on screen. You can also select individual visible candidates. Choose **Approve selected** and confirm the summary. Cross-file candidates are marked as confirmed and become eligible for the existing D1 **Approved Enrichment** export workflow. Within-file candidates are confirmed as repeated submissions within their source file; they are not treated as D2 enrichment. Original source rows are retained.
 
 Bulk approval is a manual decision. Review the selected candidates and conflicts before confirming; selecting all is not an identity-verification algorithm.
+
+
+## Normalization Centre and People Master exports
+
+The workspace includes a Normalization Centre with global or source-file-scoped alias rules. Approved rules are passed to the background matching worker; suggested and disabled rules do not affect matching. Rules and their change history are stored in this browser's local storage. Imported source values are not rewritten. You can add, edit, approve, disable, remove, restore a rule from history, and import/export the dictionary as Excel or CSV.
+
+The Export dialog includes **Export People Master + audit workbook**, which downloads two workbooks:
+
+- `people-master-database-ready.xlsx`: one row per reviewer-linked person, with dynamically numbered degree/year/department, phone, email, and address columns.
+- `people-master-audit-workbook.xlsx`: `People_Master`, `Academic_History`, `Contact_Details`, `Employment`, `Source_Records`, `Identity_Links`, `Normalization_Aliases`, `Unresolved_Matches`, and `Conflicts` sheets.
+
+Only explicitly confirmed identity links are grouped. Academic qualifications are emitted as separate history rows and are not treated as identity conflicts. Original source records are included in the audit workbook. Person IDs are deterministic from the primary source file and row.
